@@ -18,7 +18,9 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import com.clinic.clinicapp.domain.CommandType
 import com.clinic.clinicapp.ui.components.MicButton
 import com.clinic.clinicapp.viewmodel.VoiceUiState
 
@@ -38,7 +40,7 @@ fun VoiceBookingScreen(
         verticalArrangement = Arrangement.spacedBy(24.dp, Alignment.CenterVertically)
     ) {
         Text(
-            text = "Скажите, например:\n«Запишите меня к Ивановой завтра в три часа дня»",
+            text = "Голосовая запись на прием",
             style = MaterialTheme.typography.titleMedium,
             textAlign = androidx.compose.ui.text.style.TextAlign.Center
         )
@@ -98,16 +100,49 @@ fun VoiceBookingScreen(
                 val cmd = state.command
                 Card {
                     Column(Modifier.padding(16.dp)) {
-                        Text("Распознано: «${cmd.rawText}»", style = MaterialTheme.typography.bodySmall)
+                        Text(
+                            text = "Распознано: «${cmd.rawText}»",
+                            style = MaterialTheme.typography.bodySmall
+                        )
                         Spacer(Modifier.height(8.dp))
-                        Text("Врач: ${cmd.doctor?.name ?: "не найден"}")
-                        Text("Дата: ${cmd.date ?: "не найдена"}")
-                        Text("Время: ${cmd.time ?: "не найдено"}")
+
+                        when (cmd.type) {
+                            CommandType.CANCEL_ALL -> {
+                                Text("Отменить ВСЕ записи?", fontWeight = FontWeight.Bold)
+                                Text("Это действие нельзя отменить.")
+                            }
+                            CommandType.BOOK_NEAREST -> {
+                                Text("Записать на ближайшее свободное время?", fontWeight = FontWeight.Bold)
+                            }
+                            CommandType.BOOK_SPECIFIC -> {
+                                Text("Врач: ${cmd.doctor?.name ?: "не найден"}")
+                                Text("Дата: ${cmd.date ?: "не найдена"}")
+                                Text("Время: ${cmd.time ?: "не найдено"}")
+                            }
+                            CommandType.UNKNOWN -> {
+                                Text("Команда не распознана")
+                            }
+                        }
+
                         Spacer(Modifier.height(12.dp))
                         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            Button(onClick = onConfirm, enabled = cmd.isComplete) { Text("Подтвердить") }
+                            Button(
+                                onClick = onConfirm,
+                                enabled = cmd.isComplete
+                            ) { Text("Подтвердить") }
                             OutlinedButton(onClick = onReset) { Text("Отмена") }
                         }
+                    }
+                }
+            }
+
+            is VoiceUiState.Cancelled -> {
+                Card {
+                    Column(Modifier.padding(16.dp)) {
+                        Text("Записи отменены", style = MaterialTheme.typography.titleLarge)
+                        Text("Отменено записей: ${state.count}")
+                        Spacer(Modifier.height(12.dp))
+                        Button(onClick = onReset) { Text("Ок") }
                     }
                 }
             }

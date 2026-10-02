@@ -91,7 +91,7 @@ private fun AppRoot(repository: InMemoryAppointmentRepository) {
                     onStartRecording = voiceVm::startRecording,
                     onStopRecording = voiceVm::stopRecording,
                     onConfirm = {
-                        voiceVm.confirmBooking()
+                        voiceVm.confirm()
                         showVoiceSheet = false
                     },
                     onReset = voiceVm::reset
