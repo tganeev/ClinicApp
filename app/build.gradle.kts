@@ -1,0 +1,97 @@
+plugins {
+    alias(libs.plugins.android.application)
+    alias(libs.plugins.kotlin.android)
+    alias(libs.plugins.kotlin.compose)
+}
+
+android {
+    namespace = "com.clinic.clinicapp"
+    compileSdk = 36
+
+    defaultConfig {
+        applicationId = "com.clinic.clinicapp"
+        minSdk = 24                            // минимум для sherpa-onnx
+        targetSdk = 36
+        versionCode = 1
+        versionName = "1.0"
+
+        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+    }
+
+    buildTypes {
+        release {
+            isMinifyEnabled = false
+            proguardFiles(
+                getDefaultProguardFile("proguard-android-optimize.txt"),
+                "proguard-rules.pro"
+            )
+        }
+    }
+
+    // Java 17 — требуется современными AGP, Compose и sherpa-onnx
+    compileOptions {
+        sourceCompatibility = JavaVersion.VERSION_17
+        targetCompatibility = JavaVersion.VERSION_17
+        isCoreLibraryDesugaringEnabled = true
+    }
+
+    kotlinOptions {
+        jvmTarget = "17"
+    }
+
+    // Файлы .onnx и .txt не сжимаются — иначе sherpa-onnx не прочитает модель из assets
+    androidResources {
+        noCompress += listOf("onnx", "txt")
+    }
+
+    buildFeatures {
+        compose = true
+    }
+
+    packaging {
+        jniLibs {
+            pickFirsts += "**/libonnxruntime.so"
+        }
+    }
+
+
+}
+
+dependencies {
+
+    // ---- Базовые зависимости ----
+    implementation(libs.androidx.core.ktx)
+    implementation(libs.androidx.lifecycle.runtime.ktx)
+    implementation(libs.androidx.activity.compose)
+
+    // ---- Compose BOM управляет версиями всех модулей Compose ----
+    implementation(platform(libs.androidx.compose.bom))
+    implementation(libs.androidx.compose.ui)
+    implementation(libs.androidx.compose.ui.graphics)
+    implementation(libs.androidx.compose.ui.tooling.preview)
+    implementation(libs.androidx.compose.material3)
+
+    // ---- ViewModel для Compose ----
+    implementation(libs.androidx.lifecycle.viewmodel.compose)
+
+    // ---- Иконка микрофона (Icons.Filled.Mic) ----
+    implementation(libs.androidx.compose.material.icons.extended)
+
+    // ---- Корутины для AudioRecorder, SherpaSttEngine, ViewModel ----
+    implementation(libs.kotlinx.coroutines.android)
+
+    // ---- sherpa-onnx (локальный AAR) ----
+    // Решение №1: используем ОТНОСИТЕЛЬНЫЙ путь от модуля app/, начинающийся с "libs/".
+    // Файл должен физически лежать в app/libs/sherpa-onnx.aar
+    implementation("com.xdcobra.sherpa:sherpa-onnx:1.12.24")
+
+    // ---- Тестовые зависимости ----
+    testImplementation(libs.junit)
+    androidTestImplementation(libs.androidx.junit)
+    androidTestImplementation(libs.androidx.espresso.core)
+    androidTestImplementation(platform(libs.androidx.compose.bom))
+    androidTestImplementation(libs.androidx.compose.ui.test.junit4)
+    debugImplementation(libs.androidx.compose.ui.tooling)
+    debugImplementation(libs.androidx.compose.ui.test.manifest)
+    coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.1.4")
+}

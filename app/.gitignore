@@ -1,0 +1,4 @@
+/build
+
+# ---- ASR-модели (слишком большие для GitHub) ----
+app/src/main/assets/models/
