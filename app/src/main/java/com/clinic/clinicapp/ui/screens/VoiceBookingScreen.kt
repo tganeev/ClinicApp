@@ -5,11 +5,13 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
@@ -44,7 +46,9 @@ fun VoiceBookingScreen(
         // Кнопка блокируется во время инициализации и распознавания
         MicButton(
             isRecording = state is VoiceUiState.Recording,
-            enabled = state !is VoiceUiState.Transcribing && state !is VoiceUiState.Initializing,
+            enabled = state !is VoiceUiState.Transcribing
+                    && state !is VoiceUiState.Initializing
+                    && state !is VoiceUiState.DownloadingModel,  // ← добавили
             onPress = onStartRecording,
             onRelease = onStopRecording
         )
@@ -67,6 +71,28 @@ fun VoiceBookingScreen(
                 CircularProgressIndicator()
                 Text("Распознавание…")
             }
+
+            is VoiceUiState.DownloadingModel -> {
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    Text("Загрузка модели распознавания речи…")
+                    Spacer(Modifier.height(8.dp))
+                    if (state.total > 0) {
+                        val fraction = state.downloaded.toFloat() / state.total.toFloat()
+                        LinearProgressIndicator(
+                            progress = { fraction },
+                            modifier = Modifier.fillMaxWidth(0.7f)
+                        )
+                        Spacer(Modifier.height(4.dp))
+                        val downloadedMb = state.downloaded / 1024f / 1024f
+                        val totalMb = state.total / 1024f / 1024f
+                        Text("%.1f / %.1f МБ".format(downloadedMb, totalMb))
+                    } else {
+                        CircularProgressIndicator()
+                        Text("${state.downloaded / 1024 / 1024} МБ загружено")
+                    }
+                }
+            }
+
 
             is VoiceUiState.Parsed -> {
                 val cmd = state.command
@@ -102,7 +128,7 @@ fun VoiceBookingScreen(
                 Button(onClick = onReset) { Text("Повторить") }
             }
 
-            VoiceUiState.Ready -> TODO()
+
         }
     }
 }

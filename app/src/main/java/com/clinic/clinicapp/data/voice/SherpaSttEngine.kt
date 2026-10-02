@@ -7,17 +7,15 @@ import com.k2fsa.sherpa.onnx.OfflineModelConfig
 import com.k2fsa.sherpa.onnx.OfflineNemoEncDecCtcModelConfig
 import com.k2fsa.sherpa.onnx.OfflineRecognizer
 import com.k2fsa.sherpa.onnx.OfflineRecognizerConfig
-import com.k2fsa.sherpa.onnx.OfflineWhisperModelConfig
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import java.io.File
 
 /**
- * Обёртка над sherpa-onnx для распознавания речи.
- * Использует модель Whisper Tiny (английская версия).
+ * Обёртка над sherpa-onnx для распознавания русской речи (GigaAM NeMo CTC).
  *
- * ВАЖНО: инициализация Whisper может занимать 10-15+ секунд,
- * поэтому её нужно делать заранее (при старте приложения),
- * а не в момент нажатия кнопки.
+ * Модель НЕ входит в APK — она скачивается при первом запуске в filesDir/models/.
+ * Это уменьшает размер APK с ~340 МБ до ~15 МБ.
  */
 class SherpaSttEngine(private val context: Context) {
 
@@ -25,37 +23,43 @@ class SherpaSttEngine(private val context: Context) {
 
     private var recognizer: OfflineRecognizer? = null
     private var isInitialized = false
+    private var modelDir: File? = null
 
     /**
-     * Инициализировать движок заранее.
-     * Вызывай этот метод при старте приложения.
+     * Инициализация: скачивает модель (если её нет) и загружает sherpa-onnx.
+     *
+     * @param onDownloadProgress callback для UI: (downloaded, total).
+     *        total = -1, если сервер не прислал Content-Length.
      */
-    suspend fun initialize(): Boolean = withContext(Dispatchers.IO) {
+    suspend fun initialize(
+        onDownloadProgress: (Long, Long) -> Unit = { _, _ -> }
+    ): Boolean = withContext(Dispatchers.IO) {
         if (isInitialized) return@withContext true
 
         try {
-            Log.d(TAG, "Начало инициализации Whisper Tiny...")
+            Log.d(TAG, "Проверка наличия модели…")
+            val downloader = ModelDownloader(context)
+            val modelDirLocal = downloader.ensureModel(onDownloadProgress)
+            modelDir = modelDirLocal
+
+            Log.d(TAG, "Инициализация sherpa-onnx с моделью из ${modelDirLocal.absolutePath}")
             val startTime = System.currentTimeMillis()
 
-            val modelDir = "models/sherpa-onnx-nemo-ctc-giga-am-v2-russian-2025-04-19"
             val config = OfflineRecognizerConfig(
                 featConfig = FeatureConfig(sampleRate = 16000, featureDim = 80),
                 modelConfig = OfflineModelConfig(
-                    nemo = OfflineNemoEncDecCtcModelConfig( // Используем NeMo CTC
-                        model = "$modelDir/model.int8.onnx"
+                    nemo = OfflineNemoEncDecCtcModelConfig(
+                        model = File(modelDirLocal, "model.int8.onnx").absolutePath
                     ),
-                    tokens = "$modelDir/tokens.txt",
+                    tokens = File(modelDirLocal, "tokens.txt").absolutePath,
                     numThreads = 2,
                     provider = "cpu",
                     debug = false
                 )
             )
 
-            Log.d(TAG, "Создание OfflineRecognizer...")
-            recognizer = OfflineRecognizer(
-                assetManager = context.assets,
-                config = config
-            )
+            // ВАЖНО: здесь НЕ передаём assetManager — грузим из файловой системы.
+            recognizer = OfflineRecognizer(config = config)
 
             val elapsed = System.currentTimeMillis() - startTime
             Log.d(TAG, "Инициализация завершена за ${elapsed}мс")
@@ -68,33 +72,27 @@ class SherpaSttEngine(private val context: Context) {
     }
 
     /**
-     * Распознать фразу.
-     * Предполагает, что initialize() уже был вызван.
+     * Распознать фразу из массива сэмплов (16 кГц, моно, float в диапазоне [-1, 1]).
      */
     suspend fun transcribe(samples: FloatArray): String = withContext(Dispatchers.IO) {
         Log.d(TAG, "transcribe called, samples=${samples.size}")
 
-        if (recognizer == null) {
+        val rec = recognizer
+        if (rec == null) {
             Log.e(TAG, "Recognizer не инициализирован!")
             return@withContext ""
         }
 
         try {
             val startTime = System.currentTimeMillis()
-            val stream = recognizer!!.createStream()
-            Log.d(TAG, "Stream создан")
-
+            val stream = rec.createStream()
             stream.acceptWaveform(samples, sampleRate = 16000)
-            Log.d(TAG, "Аудио принято")
+            rec.decode(stream)
+            val result = rec.getResult(stream).text.trim()
+            stream.release()
 
-            recognizer!!.decode(stream)
-            Log.d(TAG, "Decode завершён")
-
-            val result = recognizer!!.getResult(stream).text.trim()
             val elapsed = System.currentTimeMillis() - startTime
             Log.d(TAG, "Результат: «$result» за ${elapsed}мс")
-
-            stream.release()
             result
         } catch (t: Throwable) {
             Log.e(TAG, "Ошибка распознавания", t)

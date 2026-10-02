@@ -17,8 +17,8 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
 
 sealed interface VoiceUiState {
-    data object Initializing : VoiceUiState   // НОВОЕ состояние
-    data object Ready : VoiceUiState
+    data object Initializing : VoiceUiState
+    data class DownloadingModel(val downloaded: Long, val total: Long) : VoiceUiState  // ← новое
     data object Idle : VoiceUiState
     data object Recording : VoiceUiState
     data object Transcribing : VoiceUiState
@@ -42,10 +42,12 @@ class VoiceBookingViewModel(
     val state: StateFlow<VoiceUiState> = _state
 
     init {
-        // Инициализируем Whisper заранее, при создании ViewModel
         viewModelScope.launch {
             Log.d(TAG, "Инициализация STT...")
-            val ok = stt.initialize()
+            val ok = stt.initialize { downloaded, total ->
+                // callback вызывается из фонового потока — обновляем StateFlow
+                _state.value = VoiceUiState.DownloadingModel(downloaded, total)
+            }
             _state.value = if (ok) {
                 Log.d(TAG, "STT готов")
                 VoiceUiState.Idle
