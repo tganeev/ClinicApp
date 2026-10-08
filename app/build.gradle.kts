@@ -2,6 +2,7 @@ plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.android)
     alias(libs.plugins.kotlin.compose)
+    alias(libs.plugins.kotlin.serialization)
 }
 
 android {
@@ -41,7 +42,7 @@ android {
 
     // Файлы .onnx и .txt не сжимаются — иначе sherpa-onnx не прочитает модель из assets
     androidResources {
-        noCompress += listOf("onnx", "txt")
+        noCompress += listOf("onnx", "txt", "json")
     }
 
     buildFeatures {
@@ -50,9 +51,16 @@ android {
 
     packaging {
         jniLibs {
-            pickFirsts += "**/libonnxruntime.so"
+            pickFirsts += listOf(
+                "**/libonnxruntime.so",
+                "**/libonnxruntime4j_jni.so"
+            )
         }
     }
+
+
+
+
 
 
 }
@@ -83,7 +91,14 @@ dependencies {
     // ---- sherpa-onnx (локальный AAR) ----
     // Решение №1: используем ОТНОСИТЕЛЬНЫЙ путь от модуля app/, начинающийся с "libs/".
     // Файл должен физически лежать в app/libs/sherpa-onnx.aar
-    implementation("com.xdcobra.sherpa:sherpa-onnx:1.12.24")
+    implementation("com.microsoft.onnxruntime:onnxruntime-android:1.24.2")
+
+    implementation("com.xdcobra.sherpa:sherpa-onnx:1.12.24") {
+        exclude(group = "com.xdcobra.sherpa", module = "onnxruntime")
+    }
+
+    // Microsoft ONNX Runtime — единая версия для NLU и sherpa
+
 
     // ---- Тестовые зависимости ----
     testImplementation(libs.junit)
@@ -95,4 +110,11 @@ dependencies {
     debugImplementation(libs.androidx.compose.ui.test.manifest)
     coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.1.4")
     implementation("org.apache.commons:commons-compress:1.27.1")
+
+
+
+
+
+    // JSON-парсер для tokenizer.json
+    implementation(libs.kotlinx.serialization.json)
 }

@@ -19,7 +19,10 @@ enum class CommandType {
     CANCEL_ALL,
 
     /** Команда не распознана. */
-    UNKNOWN
+    UNKNOWN,
+
+    RESCHEDULE,      // перенос записи
+    CANCEL_ONE
 }
 
 /**
@@ -39,6 +42,8 @@ data class ParsedCommand(
             CommandType.BOOK_NEAREST -> true
             CommandType.CANCEL_ALL -> true
             CommandType.UNKNOWN -> false
+            CommandType.RESCHEDULE -> TODO()
+            CommandType.CANCEL_ONE -> TODO()
         }
 }
 

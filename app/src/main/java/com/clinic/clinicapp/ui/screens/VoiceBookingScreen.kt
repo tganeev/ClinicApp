@@ -58,7 +58,7 @@ fun VoiceBookingScreen(
         when (state) {
             is VoiceUiState.Initializing -> {
                 CircularProgressIndicator()
-                Text("Загрузка модели Whisper Tiny (может занять до 30 сек)…")
+                Text("Загрузка модели распознавания речи…")
             }
 
             is VoiceUiState.Idle -> {
@@ -107,8 +107,8 @@ fun VoiceBookingScreen(
                         Spacer(Modifier.height(8.dp))
 
                         when (cmd.type) {
-                            CommandType.CANCEL_ALL -> {
-                                Text("Отменить ВСЕ записи?", fontWeight = FontWeight.Bold)
+                            CommandType.CANCEL_ALL, CommandType.CANCEL_ONE -> {
+                                Text("Отменить запись?", fontWeight = FontWeight.Bold)
                                 Text("Это действие нельзя отменить.")
                             }
                             CommandType.BOOK_NEAREST -> {
@@ -118,6 +118,10 @@ fun VoiceBookingScreen(
                                 Text("Врач: ${cmd.doctor?.name ?: "не найден"}")
                                 Text("Дата: ${cmd.date ?: "не найдена"}")
                                 Text("Время: ${cmd.time ?: "не найдено"}")
+                            }
+                            CommandType.RESCHEDULE -> {
+                                Text("Перенести запись", fontWeight = FontWeight.Bold)
+                                Text("Эта функция пока в разработке.")
                             }
                             CommandType.UNKNOWN -> {
                                 Text("Команда не распознана")
