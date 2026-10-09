@@ -92,6 +92,20 @@ class BpeTokenizer private constructor(
     }
 
     /**
+     * Кодирует текст БЕЗ специальных токенов.
+     * Возвращает только ID токенов текста (для промпта TFLite-модели).
+     */
+    fun encodeText(text: String): List<Int> {
+        val result = ArrayList<Int>()
+        val words = text.lowercase().trim().split(Regex("\\s+"))
+        for (word in words) {
+            if (word.isEmpty()) continue
+            result.addAll(encodeWord(word))
+        }
+        return result
+    }
+
+    /**
      * Кодирует текст в массив ID длиной maxLength.
      * Схема: [<BOS>] + токены текста + [<EOS>] + [<PAD>...].
      */

@@ -49,17 +49,6 @@ android {
         compose = true
     }
 
-    packaging {
-        jniLibs {
-            pickFirsts += listOf(
-                "**/libonnxruntime.so",
-                "**/libonnxruntime4j_jni.so"
-            )
-        }
-    }
-
-
-
 
 
 
@@ -88,11 +77,6 @@ dependencies {
     // ---- Корутины для AudioRecorder, SherpaSttEngine, ViewModel ----
     implementation(libs.kotlinx.coroutines.android)
 
-    // ---- sherpa-onnx (локальный AAR) ----
-    // Решение №1: используем ОТНОСИТЕЛЬНЫЙ путь от модуля app/, начинающийся с "libs/".
-    // Файл должен физически лежать в app/libs/sherpa-onnx.aar
-    implementation("com.microsoft.onnxruntime:onnxruntime-android:1.24.2")
-
     implementation("com.xdcobra.sherpa:sherpa-onnx:1.12.24") {
         exclude(group = "com.xdcobra.sherpa", module = "onnxruntime")
     }
@@ -111,9 +95,8 @@ dependencies {
     coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.1.4")
     implementation("org.apache.commons:commons-compress:1.27.1")
 
-
-
-
+    // TensorFlow Lite для NLU-модели clinic_lm
+    implementation("com.google.ai.edge.litert:litert:1.4.0")
 
     // JSON-парсер для tokenizer.json
     implementation(libs.kotlinx.serialization.json)
