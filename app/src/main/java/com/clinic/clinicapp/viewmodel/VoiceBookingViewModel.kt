@@ -8,9 +8,11 @@ import com.clinic.clinicapp.data.nlu.NluEngine
 import com.clinic.clinicapp.data.repository.AppointmentRepository
 import com.clinic.clinicapp.data.voice.AudioRecorder
 import com.clinic.clinicapp.data.voice.SherpaSttEngine
+import com.clinic.clinicapp.data.voice.SpeechSynthesizer
 import com.clinic.clinicapp.domain.CommandType
 import com.clinic.clinicapp.domain.ParsedCommand
 import com.clinic.clinicapp.domain.VoiceCommandParser
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
@@ -19,47 +21,31 @@ import kotlinx.coroutines.launch
  * Состояния экрана голосовой записи.
  */
 sealed interface VoiceUiState {
-    /** Идёт инициализация (загрузка моделей STT/NLU). */
     data object Initializing : VoiceUiState
-
-    /** Скачивание модели с показом прогресса. */
     data class DownloadingModel(val downloaded: Long, val total: Long) : VoiceUiState
-
-    /** Готово к записи. */
     data object Idle : VoiceUiState
-
-    /** Идёт запись голоса. */
     data object Recording : VoiceUiState
-
-    /** Идёт распознавание и парсинг. */
     data object Transcribing : VoiceUiState
 
-    /** Команда распознана, ждём подтверждения. */
-    data class Parsed(val command: ParsedCommand) : VoiceUiState
+    /** Команда распознана, ждём голосового подтверждения. */
+    data class AwaitingConfirmation(
+        val command: ParsedCommand,
+        val question: String
+    ) : VoiceUiState
 
-    /** Запись создана (обычная или на ближайшее время). */
+    /** Система слушает ответ «да/нет». */
+    data object ListeningConfirmation : VoiceUiState
+
     data class Booked(
         val doctorName: String,
         val date: String,
         val time: String
     ) : VoiceUiState
 
-    /** Все записи отменены. */
     data class Cancelled(val count: Int) : VoiceUiState
-
-    /** Ошибка. */
     data class Error(val message: String) : VoiceUiState
 }
 
-/**
- * ViewModel голосового экрана.
- * Управляет:
- *  - записью аудио через AudioRecorder;
- *  - распознаванием речи через SherpaSttEngine (GigaAM);
- *  - парсингом текста через NluEngine (clinic_lm);
- *  - fallback на regex-парсер VoiceCommandParser;
- *  - созданием/отменой записей в AppointmentRepository.
- */
 class VoiceBookingViewModel(
     app: Application,
     private val repository: AppointmentRepository
@@ -69,8 +55,12 @@ class VoiceBookingViewModel(
 
     private val recorder = AudioRecorder()
     private val stt = SherpaSttEngine(app)
+    private val tts = SpeechSynthesizer(app)
     private val nlu = NluEngine(app)
     private val regexParser = VoiceCommandParser(repository)
+
+    /** Распознанная команда, ожидающая голосового подтверждения. */
+    private var pendingCommand: ParsedCommand? = null
 
     private val _state = MutableStateFlow<VoiceUiState>(VoiceUiState.Initializing)
     val state: StateFlow<VoiceUiState> = _state
@@ -87,17 +77,20 @@ class VoiceBookingViewModel(
                 _state.value = VoiceUiState.DownloadingModel(downloaded, total)
             }
 
-            _state.value = if (sttOk && nluOk) {
-                Log.d(TAG, "Все модели загружены")
+            Log.d(TAG, "Инициализация TTS...")
+            val ttsOk = tts.initialize()
+
+            // STT критичен. NLU и TTS — опциональны.
+            _state.value = if (sttOk) {
+                Log.d(TAG, "Все модели готовы: STT=$sttOk, NLU=$nluOk, TTS=$ttsOk")
                 VoiceUiState.Idle
             } else {
-                Log.e(TAG, "Не удалось загрузить модели: stt=$sttOk, nlu=$nluOk")
-                VoiceUiState.Error("Не удалось загрузить модели распознавания")
+                Log.e(TAG, "STT не загрузился")
+                VoiceUiState.Error("Не удалось загрузить модель распознавания речи")
             }
         }
     }
 
-    /** Начать запись — вызывается при нажатии на микрофон. */
     fun startRecording() {
         Log.d(TAG, "startRecording called")
         viewModelScope.launch {
@@ -112,7 +105,6 @@ class VoiceBookingViewModel(
         }
     }
 
-    /** Остановить запись, распознать текст, распарсить — вызывается при отпускании микрофона. */
     fun stopRecording() {
         Log.d(TAG, "stopRecording called")
         viewModelScope.launch {
@@ -137,7 +129,28 @@ class VoiceBookingViewModel(
                 val parsed = parseText(text)
                 Log.d(TAG, "Parsed: type=${parsed.type}, doctor=${parsed.doctor?.name}, " +
                         "date=${parsed.date}, time=${parsed.time}")
-                _state.value = VoiceUiState.Parsed(parsed)
+
+                // Формируем вопрос для голосового подтверждения
+                val question = buildConfirmationQuestion(parsed)
+                if (question == null) {
+                    _state.value = VoiceUiState.Error(
+                        "Команда не распознана. Скажите: «Запишите меня к терапевту завтра в 15:00»"
+                    )
+                    return@launch
+                }
+
+                pendingCommand = parsed
+                _state.value = VoiceUiState.AwaitingConfirmation(parsed, question)
+
+                // Озвучиваем вопрос и слушаем ответ
+                Log.d(TAG, "Озвучивание вопроса: $question")
+                tts.speak(question)
+
+                // Небольшая пауза перед записью, чтобы TTS точно закончил
+                delay(500)
+
+                listenForConfirmation()
+
             } catch (t: Throwable) {
                 Log.e(TAG, "error in stopRecording", t)
                 _state.value = VoiceUiState.Error(t.message ?: "Ошибка распознавания")
@@ -146,10 +159,95 @@ class VoiceBookingViewModel(
     }
 
     /**
-     * Парсит текст: сначала пробует NLU-модель, при неудаче — regex-fallback.
+     * Записывает ответ пользователя («да»/«нет») и обрабатывает его.
+     */
+    private suspend fun listenForConfirmation() {
+        _state.value = VoiceUiState.ListeningConfirmation
+
+        try {
+            Log.d(TAG, "Начинаем слушать ответ...")
+            recorder.start()
+
+            // Слушаем 3 секунды
+            delay(3000)
+
+            val answerSamples = recorder.stop()
+            Log.d(TAG, "Сэмплов ответа: ${answerSamples.size}")
+
+            if (answerSamples.isEmpty()) {
+                _state.value = VoiceUiState.Error("Не услышал ответ")
+                return
+            }
+
+            val answerText = stt.transcribe(answerSamples).lowercase().trim()
+            Log.d(TAG, "Ответ пользователя: «$answerText»")
+
+            when {
+                isAffirmative(answerText) -> confirmVoice()
+                isNegative(answerText) -> {
+                    Log.d(TAG, "Пользователь отказался")
+                    _state.value = VoiceUiState.Error("Действие отменено")
+                }
+                else -> {
+                    Log.w(TAG, "Ответ не распознан: $answerText")
+                    _state.value = VoiceUiState.Error("Не понял ответ. Скажите «да» или «нет»")
+                }
+            }
+        } catch (t: Throwable) {
+            Log.e(TAG, "error in listenForConfirmation", t)
+            _state.value = VoiceUiState.Error(t.message ?: "Ошибка прослушивания ответа")
+        }
+    }
+
+    /** Проверяет, что ответ — «да». */
+    private fun isAffirmative(text: String): Boolean {
+        val yesWords = listOf(
+            "да", "ага", "угу", "конечно", "верно", "правильно",
+            "подтверждаю", "подтвердить", "хорошо", "ок", "окей",
+            "yes", "ok"
+        )
+        return yesWords.any { text.contains(it) }
+    }
+
+    /** Проверяет, что ответ — «нет». */
+    private fun isNegative(text: String): Boolean {
+        val noWords = listOf(
+            "нет", "не надо", "не нужно", "отмена", "отменить",
+            "отменяю", "стоп", "no", "cancel"
+        )
+        return noWords.any { text.contains(it) }
+    }
+
+    /**
+     * Формирует текст вопроса для TTS.
+     * Возвращает null, если команда не распознана или не поддерживается.
+     */
+    private fun buildConfirmationQuestion(cmd: ParsedCommand): String? {
+        return when (cmd.type) {
+            CommandType.CANCEL_ALL -> "Отменить все ваши записи? Скажите да или нет."
+
+            CommandType.BOOK_NEAREST -> "Записать вас на ближайшее свободное время? Скажите да или нет."
+
+            CommandType.BOOK_SPECIFIC -> {
+                val doctor = cmd.doctor?.name
+                val date = cmd.date
+                val time = cmd.time
+                if (doctor == null || date == null || time == null) {
+                    Log.w(TAG, "Не хватает данных: doctor=$doctor, date=$date, time=$time")
+                    null
+                } else {
+                    "Записать вас к $doctor на $date в $time? Скажите да или нет."
+                }
+            }
+
+            else -> null
+        }
+    }
+
+    /**
+     * Парсит текст: сначала NLU, при неудаче — regex-fallback.
      */
     private suspend fun parseText(text: String): ParsedCommand {
-        // Основной путь — NLU-модель
         val nluResult = try {
             nlu.parse(text)
         } catch (t: Throwable) {
@@ -158,7 +256,6 @@ class VoiceBookingViewModel(
         }
 
         if (nluResult != null && nluResult.intent != CommandType.UNKNOWN) {
-            // Ищем врача по специальности
             val doctor = nluResult.specialty?.let { spec ->
                 repository.doctors.value.find {
                     it.specialty.equals(spec, ignoreCase = true)
@@ -173,18 +270,20 @@ class VoiceBookingViewModel(
             )
         }
 
-        // Fallback: regex-парсер
         Log.d(TAG, "NLU не справился, используем regex")
         return regexParser.parse(text)
     }
 
     /**
-     * Подтверждение распознанной команды.
-     * В зависимости от типа — либо создаём запись, либо отменяем всё.
+     * Выполняет распознанную команду после подтверждения «да».
      */
-    fun confirm() {
-        val current = _state.value as? VoiceUiState.Parsed ?: return
-        val cmd = current.command
+    private fun confirmVoice() {
+        val cmd = pendingCommand
+        if (cmd == null) {
+            Log.e(TAG, "pendingCommand == null, нечего подтверждать")
+            return
+        }
+        pendingCommand = null
 
         when (cmd.type) {
             CommandType.CANCEL_ALL, CommandType.CANCEL_ONE -> {
@@ -232,27 +331,26 @@ class VoiceBookingViewModel(
             }
 
             CommandType.RESCHEDULE -> {
-                // Пока не реализовано — сообщаем пользователю
                 _state.value = VoiceUiState.Error("Перенос записи пока не поддерживается")
             }
 
             CommandType.UNKNOWN -> {
-                _state.value = VoiceUiState.Error(
-                    "Команда не распознана. Скажите: «Запишите меня к терапевту завтра в 15:00»"
-                )
+                _state.value = VoiceUiState.Error("Команда не распознана")
             }
         }
     }
 
-    /** Сбросить состояние — например, после ошибки или завершения. */
+    /** Сбросить состояние. */
     fun reset() {
         Log.d(TAG, "reset")
+        pendingCommand = null
         _state.value = VoiceUiState.Idle
     }
 
     override fun onCleared() {
         stt.release()
         nlu.release()
+        tts.release()
         super.onCleared()
     }
 }

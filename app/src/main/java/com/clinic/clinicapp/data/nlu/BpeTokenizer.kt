@@ -92,6 +92,34 @@ class BpeTokenizer private constructor(
     }
 
     /**
+     * Отладочная функция: кодирует текст и возвращает читаемое представление
+     * каждого токена с его ID.
+     */
+    fun debugEncode(text: String): String {
+        val sb = StringBuilder()
+        sb.append("Текст: «$text»\n")
+
+        val words = text.lowercase().trim().split(Regex("\\s+"))
+        var totalIds = 0
+        for (word in words) {
+            if (word.isEmpty()) continue
+            val bytes = word.toByteArray(Charsets.UTF_8)
+            val chars = bytes.map { byteToPrintableChar(it) }
+            val merged = applyBpe(chars)
+            val ids = merged.mapNotNull { unit -> vocab[unit] }
+            totalIds += ids.size
+
+            sb.append("  слово «$word»:\n")
+            sb.append("    ByteLevel-символы: ${chars.joinToString(" ") { "'$it'" }}\n")
+            sb.append("    BPE-юниты: ${merged.joinToString(" ") { "'$it'" }}\n")
+            sb.append("    ID: $ids\n")
+            sb.append("    Токены: ${ids.map { id -> tokenOf(id.toLong()) ?: "?" }}\n")
+        }
+        sb.append("Всего токенов: $totalIds")
+        return sb.toString()
+    }
+
+    /**
      * Кодирует текст БЕЗ специальных токенов.
      * Возвращает только ID токенов текста (для промпта TFLite-модели).
      */

@@ -65,34 +65,56 @@ class FrameAutomaton(
         tokenizer: BpeTokenizer
     ): Pair<String, LongArray> {
         // 1. Токенизируем текст
-        val textIds = tokenizer.encodeText(text)  // без <BOS>/<EOS>/<PAD>
+        val textIds = tokenizer.encodeText(text)
+        Log.d(TAG, "Текст: «$text»")
+        Log.d(TAG, "Токены текста (${textIds.size}): ${textIds.map { tokenizer.tokenOf(it.toLong()) }}")
 
-        // 2. Собираем промпт: [BOS, USER] + textIds + [ASSISTANT]
+        // 2. Собираем промпт
         val seq = ArrayList<Long>(CONTEXT_SIZE)
         seq += bosId.toLong()
         seq += userId.toLong()
         seq.addAll(textIds.map { it.toLong() })
         seq += assistantId.toLong()
 
-        Log.d(TAG, "Промпт: ${seq.size} токенов")
+        Log.d(TAG, "Промпт: [BOS=${bosId}] [USER=${userId}] " +
+                "${textIds.map { tokenizer.tokenOf(it.toLong()) }} [ASSISTANT=${assistantId}]")
+        Log.d(TAG, "Длина промпта: ${seq.size}")
 
-        // 3. Жадная генерация с маской автомата
+        // 3. Жадная генерация с маской
         val generated = ArrayList<Long>()
         var state = State.INTENT
 
         for (step in 0 until MAX_STEPS) {
-            if (seq.size >= CONTEXT_SIZE) break
+            if (seq.size >= CONTEXT_SIZE) {
+                Log.d(TAG, "Шаг $step: достигнут лимит контекста")
+                break
+            }
 
-            // Собираем входной массив 128 токенов (хвост — padId)
             val input = LongArray(CONTEXT_SIZE) { padId.toLong() }
             for (i in seq.indices) input[i] = seq[i]
 
-            // Получаем логиты последней позиции
             val logits = forward(input)
 
             // Маскируем запрещённые токены
             val allowed = allowedTokensFor(state)
+            val allowedNames = allowed.mapNotNull { id -> tokenizer.tokenOf(id.toLong()) }
+
+            Log.d(TAG, "Шаг $step: state=$state, разрешено ${allowed.size} токенов: $allowedNames")
+
+            // Смотрим логиты для всех разрешённых токенов и для EOS
+            val scoresLog = StringBuilder("  Логиты разрешённых: ")
+            for (id in allowed) {
+                val name = tokenizer.tokenOf(id.toLong()) ?: "?"
+                scoresLog.append("$name=${"%.3f".format(logits[id])} ")
+            }
+            scoresLog.append(" | EOS=${"%.3f".format(logits[eosId])}")
+            Log.d(TAG, scoresLog.toString())
+
+            // argmax
             val next = argmaxWithMask(logits, allowed)
+            val nextName = tokenizer.tokenOf(next.toLong()) ?: "<UNK:$next>"
+
+            Log.d(TAG, "Шаг $step: выбран $nextName (id=$next)")
 
             if (next == eosId) {
                 Log.d(TAG, "EOS на шаге $step")
@@ -102,15 +124,15 @@ class FrameAutomaton(
             seq += next.toLong()
             generated += next.toLong()
 
-            // Переходим в следующее состояние
+            val prevState = state
             state = nextState(state, next)
+            Log.d(TAG, "Шаг $step: переход $prevState → $state")
         }
 
-        // 4. Формируем строку фрейма
         val frame = generated.joinToString(" ") { id ->
             tokenizer.tokenOf(id) ?: "<UNK:$id>"
         }
-        Log.d(TAG, "Frame: $frame")
+        Log.d(TAG, "Итоговый Frame: $frame")
 
         return frame to generated.toLongArray()
     }

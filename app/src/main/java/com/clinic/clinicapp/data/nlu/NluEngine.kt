@@ -54,11 +54,16 @@ class NluEngine(private val context: Context) {
         val mdl = model ?: throw IllegalStateException("NLU не инициализирован")
         val atm = automaton ?: throw IllegalStateException("NLU не инициализирован")
 
+        // ОТЛАДКА: показываем, как токенизируется текст
+        Log.d(TAG, "Токенизация:\n${tok.debugEncode(text)}")
+
         val (frame, _) = atm.generate(
             forward = { ids -> mdl.forward(ids) },
             text = text,
             tokenizer = tok
         )
+        Log.d(TAG, "Frame: $frame")
+
         parser.parse(frame)
     }
 
