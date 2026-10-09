@@ -11,6 +11,8 @@ import com.clinic.clinicapp.data.voice.SherpaSttEngine
 import com.clinic.clinicapp.data.voice.SpeechSynthesizer
 import com.clinic.clinicapp.domain.CommandType
 import com.clinic.clinicapp.domain.ParsedCommand
+import com.clinic.clinicapp.domain.RussianDateFormatter
+import com.clinic.clinicapp.domain.SpecialtyDeclension
 import com.clinic.clinicapp.domain.VoiceCommandParser
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -229,29 +231,38 @@ class VoiceBookingViewModel(
             CommandType.BOOK_NEAREST -> {
                 val doctor = cmd.doctor
                 if (doctor == null) {
-                    // Без врача — ближайший слот у любого
                     "Записать вас на ближайшее свободное время?"
                 } else {
-                    // С врачом — ищем ближайший слот у него и озвучиваем конкретное время
                     val nearest = repository.findNearestFreeSlotForDoctor(doctor.id)
                     if (nearest == null) {
                         "У врача ${doctor.name} сейчас нет свободных слотов. Скажите нет, чтобы отменить."
                     } else {
                         val (foundDoctor, slot) = nearest
-                        "Ближайшая запись к ${foundDoctor.specialty} есть на ${slot.date} в ${slot.time} у врача ${foundDoctor.name}. Вас записать?"
+
+                        // Склоняем специальность: «Кардиолог» → «кардиологу»
+                        val specialtyDative = SpecialtyDeclension.toDative(foundDoctor.specialty)
+
+                        // Преобразуем дату и время в человекочитаемый вид
+                        val dateText = RussianDateFormatter.formatDate(slot.date)
+                        val timeText = RussianDateFormatter.formatTime(slot.time)
+
+                        "Ближайшая запись к $specialtyDative есть на $dateText на $timeText. Вас записать?"
                     }
                 }
             }
 
             CommandType.BOOK_SPECIFIC -> {
-                val doctor = cmd.doctor?.name
+                val doctor = cmd.doctor
                 val date = cmd.date
                 val time = cmd.time
                 if (doctor == null || date == null || time == null) {
                     Log.w(TAG, "Не хватает данных: doctor=$doctor, date=$date, time=$time")
                     null
                 } else {
-                    "Записать вас к $doctor на $date в $time?"
+                    val specialtyDative = SpecialtyDeclension.toDative(doctor.specialty)
+                    val dateText = RussianDateFormatter.formatDate(date)
+                    val timeText = RussianDateFormatter.formatTime(time)
+                    "Записать вас к $specialtyDative на $dateText на $timeText?"
                 }
             }
 
@@ -304,11 +315,13 @@ class VoiceBookingViewModel(
             CommandType.CANCEL_ALL, CommandType.CANCEL_ONE -> {
                 val count = repository.cancelAllAppointments()
                 Log.d(TAG, "cancelled $count appointments")
+                viewModelScope.launch {
+                    tts.speak("Все записи отменены")
+                }
                 _state.value = VoiceUiState.Cancelled(count)
             }
 
             CommandType.BOOK_NEAREST -> {
-                // Если в команде указан врач — ищем у него. Иначе — любой ближайший.
                 val nearest = if (cmd.doctor != null) {
                     Log.d(TAG, "Ищем ближайший слот у врача: ${cmd.doctor.name}")
                     repository.findNearestFreeSlotForDoctor(cmd.doctor.id)
@@ -327,14 +340,18 @@ class VoiceBookingViewModel(
                 }
 
                 val (doctor, slot) = nearest
-                Log.d(TAG, "Найден слот: ${doctor.name}, ${slot.date} ${slot.time}")
                 val ok = repository.book(doctor.id, slot.id)
                 _state.value = if (ok) {
+                    // Озвучиваем подтверждение
+                    viewModelScope.launch {
+                        tts.speak("Запись оформлена")
+                    }
                     VoiceUiState.Booked(doctor.name, slot.date, slot.time)
                 } else {
                     VoiceUiState.Error("Не удалось записаться")
                 }
             }
+
             CommandType.BOOK_SPECIFIC -> {
                 val doctor = cmd.doctor
                 val date = cmd.date
@@ -352,6 +369,10 @@ class VoiceBookingViewModel(
                 }
                 val ok = repository.book(doctor.id, slot.id)
                 _state.value = if (ok) {
+                    // Озвучиваем подтверждение
+                    viewModelScope.launch {
+                        tts.speak("Запись оформлена")
+                    }
                     VoiceUiState.Booked(doctor.name, date, time)
                 } else {
                     VoiceUiState.Error("Не удалось создать запись")
