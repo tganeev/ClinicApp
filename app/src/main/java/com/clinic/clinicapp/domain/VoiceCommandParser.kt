@@ -75,9 +75,9 @@ class VoiceCommandParser(private val repository: AppointmentRepository) {
 
         // 2. Запись на ближайшее время
         if (isNearestTime(normalized)) {
-            return ParsedCommand(CommandType.BOOK_NEAREST, null, null, null, text)
+            val doctor = extractDoctor(normalized)
+            return ParsedCommand(CommandType.BOOK_NEAREST, doctor, null, null, text)
         }
-
         // 3. Обычная запись — врач + дата + время
         val doctor = extractDoctor(normalized)
         val date = extractDate(normalized)
@@ -87,6 +87,21 @@ class VoiceCommandParser(private val repository: AppointmentRepository) {
             ParsedCommand(CommandType.BOOK_SPECIFIC, doctor, date, time, text)
         } else {
             ParsedCommand(CommandType.UNKNOWN, null, null, null, text)
+        }
+    }
+
+    /**
+     * Ищет врача по специальности, а не только по фамилии.
+     * Пример: «кардиолог» → находит Петрова Сергея (Кардиолог).
+     */
+    private fun extractDoctorBySpecialty(text: String): Doctor? {
+        val normalized = text.lowercase().replace("ё", "е")
+
+        return repository.doctors.value.find { doctor ->
+            val specialty = doctor.specialty.lowercase().replace("ё", "е")
+            // Ищем корень специальности (первые 5 символов)
+            val stem = specialty.take(5)
+            normalized.contains(stem)
         }
     }
 
@@ -127,6 +142,7 @@ class VoiceCommandParser(private val repository: AppointmentRepository) {
     }
 
     private fun extractDoctor(text: String): Doctor? {
+        // 1. Пробуем по фамилии
         val regexToDoctor = Regex(
             """(?:к|у)\s+(?:врачу\s+|доктору\s+)?([а-я]+)""",
             RegexOption.IGNORE_CASE
@@ -136,6 +152,10 @@ class VoiceCommandParser(private val repository: AppointmentRepository) {
             repository.findDoctorByName(candidate)?.let { return it }
         }
 
+        // 2. Пробуем по специальности
+        extractDoctorBySpecialty(text)?.let { return it }
+
+        // 3. Просто ищем фамилию врача в тексте
         return repository.doctors.value.find { doctor ->
             val surname = doctor.name.lowercase().split(" ").first()
             val stem = surname.dropLast(2).takeIf { it.length >= 3 } ?: surname

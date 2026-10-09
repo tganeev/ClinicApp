@@ -34,6 +34,8 @@ interface AppointmentRepository {
      */
     fun addSlot(doctorId: String, date: String, time: String): Boolean
 
+    fun findNearestFreeSlotForDoctor(doctorId: String): Pair<Doctor, TimeSlot>?
+
 
 }
 
@@ -65,6 +67,22 @@ class InMemoryAppointmentRepository : AppointmentRepository {
 
     private val _appointments = MutableStateFlow<List<Appointment>>(emptyList())
     override val appointments: StateFlow<List<Appointment>> = _appointments
+
+    override fun findNearestFreeSlotForDoctor(doctorId: String): Pair<Doctor, TimeSlot>? {
+        val doctor = _doctors.value.find { it.id == doctorId } ?: return null
+
+        val now = java.time.LocalDateTime.now()
+
+        return doctor.availableSlots
+            .filter { it.isAvailable }
+            .mapNotNull { slot ->
+                val dateTime = parseDateTime(slot.date, slot.time) ?: return@mapNotNull null
+                Triple(doctor, slot, dateTime)
+            }
+            .filter { (_, _, dateTime) -> dateTime.isAfter(now) }
+            .minByOrNull { (_, _, dateTime) -> dateTime }
+            ?.let { (d, slot, _) -> d to slot }
+    }
 
     override fun book(doctorId: String, slotId: String): Boolean {
         val doctor = _doctors.value.find { it.id == doctorId } ?: return false

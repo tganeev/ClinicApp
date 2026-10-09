@@ -226,7 +226,22 @@ class VoiceBookingViewModel(
         return when (cmd.type) {
             CommandType.CANCEL_ALL -> "Вы уверены, что хотите отменить все свои записи?"
 
-            CommandType.BOOK_NEAREST -> "Записать вас на ближайшее свободное время?"
+            CommandType.BOOK_NEAREST -> {
+                val doctor = cmd.doctor
+                if (doctor == null) {
+                    // Без врача — ближайший слот у любого
+                    "Записать вас на ближайшее свободное время?"
+                } else {
+                    // С врачом — ищем ближайший слот у него и озвучиваем конкретное время
+                    val nearest = repository.findNearestFreeSlotForDoctor(doctor.id)
+                    if (nearest == null) {
+                        "У врача ${doctor.name} сейчас нет свободных слотов. Скажите нет, чтобы отменить."
+                    } else {
+                        val (foundDoctor, slot) = nearest
+                        "Ближайшая запись к ${foundDoctor.specialty} есть на ${slot.date} в ${slot.time} у врача ${foundDoctor.name}. Вас записать?"
+                    }
+                }
+            }
 
             CommandType.BOOK_SPECIFIC -> {
                 val doctor = cmd.doctor?.name
@@ -293,12 +308,26 @@ class VoiceBookingViewModel(
             }
 
             CommandType.BOOK_NEAREST -> {
-                val nearest = repository.findNearestFreeSlot()
+                // Если в команде указан врач — ищем у него. Иначе — любой ближайший.
+                val nearest = if (cmd.doctor != null) {
+                    Log.d(TAG, "Ищем ближайший слот у врача: ${cmd.doctor.name}")
+                    repository.findNearestFreeSlotForDoctor(cmd.doctor.id)
+                } else {
+                    Log.d(TAG, "Ищем ближайший слот у любого врача")
+                    repository.findNearestFreeSlot()
+                }
+
                 if (nearest == null) {
-                    _state.value = VoiceUiState.Error("Нет свободных слотов")
+                    _state.value = VoiceUiState.Error(
+                        if (cmd.doctor != null)
+                            "Нет свободных слотов у ${cmd.doctor.name}"
+                        else "Нет свободных слотов"
+                    )
                     return
                 }
+
                 val (doctor, slot) = nearest
+                Log.d(TAG, "Найден слот: ${doctor.name}, ${slot.date} ${slot.time}")
                 val ok = repository.book(doctor.id, slot.id)
                 _state.value = if (ok) {
                     VoiceUiState.Booked(doctor.name, slot.date, slot.time)
@@ -306,7 +335,6 @@ class VoiceBookingViewModel(
                     VoiceUiState.Error("Не удалось записаться")
                 }
             }
-
             CommandType.BOOK_SPECIFIC -> {
                 val doctor = cmd.doctor
                 val date = cmd.date
