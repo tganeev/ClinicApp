@@ -27,6 +27,14 @@ interface AppointmentRepository {
 
     /** Находит ближайший свободный слот (по дате и времени). */
     fun findNearestFreeSlot(): Pair<Doctor, TimeSlot>?
+
+    /**
+     * Добавляет новый свободный слот для врача.
+     * Возвращает true, если слот успешно добавлен.
+     */
+    fun addSlot(doctorId: String, date: String, time: String): Boolean
+
+
 }
 
 class InMemoryAppointmentRepository : AppointmentRepository {
@@ -81,6 +89,37 @@ class InMemoryAppointmentRepository : AppointmentRepository {
                 date = slot.date,
                 time = slot.time
             )
+        }
+        return true
+    }
+
+    override fun addSlot(doctorId: String, date: String, time: String): Boolean {
+        // Проверяем, что врач существует
+        val doctor = _doctors.value.find { it.id == doctorId } ?: return false
+
+        // Проверяем, что такого слота ещё нет
+        val exists = doctor.availableSlots.any {
+            it.date == date && it.time == time
+        }
+        if (exists) return false
+
+        // Генерируем уникальный ID
+        val newSlotId = "s${System.currentTimeMillis()}"
+
+        // Добавляем слот
+        _doctors.update { list ->
+            list.map { d ->
+                if (d.id == doctorId) {
+                    d.copy(
+                        availableSlots = d.availableSlots + TimeSlot(
+                            id = newSlotId,
+                            date = date,
+                            time = time,
+                            isAvailable = true
+                        )
+                    )
+                } else d
+            }
         }
         return true
     }

@@ -1,6 +1,7 @@
 // viewmodel/CalendarViewModel.kt
 package com.clinic.clinicapp.viewmodel
 
+import android.util.Log
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.clinic.clinicapp.data.model.Appointment
@@ -34,6 +35,7 @@ class CalendarViewModel(
     // Текущий отображаемый месяц (может не совпадать с выбранной датой)
     private val _displayedMonth = MutableStateFlow(YearMonth.now())
     val displayedMonth: StateFlow<YearMonth> = _displayedMonth
+    val doctors: StateFlow<List<Doctor>> = repository.doctors
 
     /**
      * Карта статусов дней: какие даты имеют записи и/или свободные слоты.
@@ -107,6 +109,8 @@ class CalendarViewModel(
         _displayedMonth.value = YearMonth.from(date)
     }
 
+
+
     /** Перейти на предыдущий месяц. */
     fun previousMonth() {
         _displayedMonth.value = _displayedMonth.value.minusMonths(1)
@@ -115,6 +119,16 @@ class CalendarViewModel(
     /** Перейти на следующий месяц. */
     fun nextMonth() {
         _displayedMonth.value = _displayedMonth.value.plusMonths(1)
+    }
+
+    /**
+     * Добавляет новый слот в расписание.
+     */
+    fun addSlot(doctorId: String, date: String, time: String) {
+        viewModelScope.launch {
+            val ok = repository.addSlot(doctorId, date, time)
+            Log.d("CalendarViewModel", "addSlot: $ok для $doctorId $date $time")
+        }
     }
 
     /** Записаться на свободный слот (пользователь нажал на элемент Free). */

@@ -224,9 +224,9 @@ class VoiceBookingViewModel(
      */
     private fun buildConfirmationQuestion(cmd: ParsedCommand): String? {
         return when (cmd.type) {
-            CommandType.CANCEL_ALL -> "Отменить все ваши записи? Скажите да или нет."
+            CommandType.CANCEL_ALL -> "Вы уверены, что хотите отменить все свои записи?"
 
-            CommandType.BOOK_NEAREST -> "Записать вас на ближайшее свободное время? Скажите да или нет."
+            CommandType.BOOK_NEAREST -> "Записать вас на ближайшее свободное время?"
 
             CommandType.BOOK_SPECIFIC -> {
                 val doctor = cmd.doctor?.name
@@ -236,7 +236,7 @@ class VoiceBookingViewModel(
                     Log.w(TAG, "Не хватает данных: doctor=$doctor, date=$date, time=$time")
                     null
                 } else {
-                    "Записать вас к $doctor на $date в $time? Скажите да или нет."
+                    "Записать вас к $doctor на $date в $time?"
                 }
             }
 
