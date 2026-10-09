@@ -148,9 +148,17 @@ class VoiceBookingViewModel(
                 Log.d(TAG, "Озвучивание вопроса: $question")
                 tts.speak(question)
 
-                // Небольшая пауза перед записью, чтобы TTS точно закончил
-                delay(500)
+                // Короткая пауза, затем — вопросительная часть отдельным вызовом.
+                // Так TTS с большей вероятностью поставит вопросительную интонацию.
+                delay(250)
+                val confirmationQuestion = when (parsed.type) {
+                    CommandType.CANCEL_ALL, CommandType.CANCEL_ONE -> "Отменить?"
+                    CommandType.BOOK_NEAREST, CommandType.BOOK_SPECIFIC -> "Записать вас?"
+                    else -> "Подтверждаете?"
+                }
+                tts.speak(confirmationQuestion)
 
+                delay(500)
                 listenForConfirmation()
 
             } catch (t: Throwable) {
@@ -226,7 +234,7 @@ class VoiceBookingViewModel(
      */
     private fun buildConfirmationQuestion(cmd: ParsedCommand): String? {
         return when (cmd.type) {
-            CommandType.CANCEL_ALL -> "Вы уверены, что хотите отменить все свои записи?"
+            CommandType.CANCEL_ALL -> "Вы уверены, что хотите свои записи"
 
             CommandType.BOOK_NEAREST -> {
                 val doctor = cmd.doctor
@@ -246,7 +254,7 @@ class VoiceBookingViewModel(
                         val dateText = RussianDateFormatter.formatDate(slot.date)
                         val timeText = RussianDateFormatter.formatTime(slot.time)
 
-                        "Ближайшая запись к $specialtyDative есть на $dateText на $timeText. Вас записать?"
+                        "Ближайшая запись к $specialtyDative есть на $dateText на $timeText."
                     }
                 }
             }
@@ -322,6 +330,7 @@ class VoiceBookingViewModel(
             }
 
             CommandType.BOOK_NEAREST -> {
+                // Если в команде указан врач — ищем у него. Иначе — любой ближайший.
                 val nearest = if (cmd.doctor != null) {
                     Log.d(TAG, "Ищем ближайший слот у врача: ${cmd.doctor.name}")
                     repository.findNearestFreeSlotForDoctor(cmd.doctor.id)
@@ -342,7 +351,6 @@ class VoiceBookingViewModel(
                 val (doctor, slot) = nearest
                 val ok = repository.book(doctor.id, slot.id)
                 _state.value = if (ok) {
-                    // Озвучиваем подтверждение
                     viewModelScope.launch {
                         tts.speak("Запись оформлена")
                     }
@@ -369,7 +377,6 @@ class VoiceBookingViewModel(
                 }
                 val ok = repository.book(doctor.id, slot.id)
                 _state.value = if (ok) {
-                    // Озвучиваем подтверждение
                     viewModelScope.launch {
                         tts.speak("Запись оформлена")
                     }

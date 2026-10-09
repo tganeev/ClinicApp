@@ -32,6 +32,11 @@ class SpeechSynthesizer(private val context: Context) {
                     Log.w(TAG, "Русский язык не поддерживается, используем default")
                     tts?.setLanguage(Locale.getDefault())
                 }
+
+                // Настройки интонации: чуть медленнее — TTS лучше выделяет интонацию
+                tts?.setPitch(1.0f)
+                tts?.setSpeechRate(0.95f)
+
                 isReady = true
                 Log.d(TAG, "TTS инициализирован")
                 if (continuation.isActive) continuation.resume(true)
