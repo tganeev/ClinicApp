@@ -1,54 +1,15 @@
 package com.clinic.clinicapp.data.nlu
 
+import com.clinic.clinicapp.data.model.Doctor
+import com.clinic.clinicapp.data.repository.AppointmentRepository
 import com.clinic.clinicapp.domain.CommandType
+import com.clinic.clinicapp.domain.ParsedCommand
+import java.time.DayOfWeek
 import java.time.LocalDate
-import java.time.LocalTime
 
-/**
- * Превращает строку фрейма (например,
- * "<BOS> <BOOK> <GP> <T_TOMORROW> <T_H15_00> <EOS>")
- * в структуру слотов.
- */
-class FrameParser {
+object FrameParser {
 
-    data class Result(
-        val intent: CommandType,
-        val specialty: String?,
-        val date: String?,
-        val time: String?
-    )
-
-    fun parse(frame: String): Result {
-        val tokens = frame.split(" ").filter { it.isNotBlank() }
-
-        var intent = CommandType.UNKNOWN
-        var specialty: String? = null
-        var date: String? = null
-        var time: String? = null
-
-        for (token in tokens) {
-            when {
-                token == "<BOOK>" -> intent = CommandType.BOOK_SPECIFIC
-                token == "<CANCEL>" -> intent = CommandType.CANCEL_ALL
-                token == "<RESCHEDULE>" -> intent = CommandType.RESCHEDULE
-                token == "<UNSUPPORTED>" -> intent = CommandType.UNKNOWN
-
-                token in specialtyMap -> specialty = specialtyMap[token]
-
-                token.startsWith("<T_") -> {
-                    // Токены времени: могут быть датой или часом
-                    val parsedDate = mapDate(token)
-                    val parsedTime = mapTime(token)
-                    if (parsedDate != null) date = parsedDate
-                    if (parsedTime != null) time = parsedTime
-                }
-            }
-        }
-
-        return Result(intent, specialty, date, time)
-    }
-
-    private val specialtyMap: Map<String, String> = mapOf(
+    private val specialtyToName = mapOf(
         "<GP>" to "Терапевт",
         "<DENTIST>" to "Стоматолог",
         "<DERMATOLOGIST>" to "Дерматолог",
@@ -60,66 +21,82 @@ class FrameParser {
         "<ENT>" to "ЛОР"
     )
 
-    /**
-     * Возвращает дату в формате "yyyy-MM-dd" или null.
-     */
-    private fun mapDate(token: String): String? {
-        val today = LocalDate.now()
-        return when (token) {
-            "<T_TODAY>" -> today.toString()
-            "<T_TOMORROW>" -> today.plusDays(1).toString()
-            "<T_DAY_AFTER_TOMORROW>" -> today.plusDays(2).toString()
-            "<T_IN_2_DAYS>" -> today.plusDays(2).toString()
-            "<T_IN_3_DAYS>" -> today.plusDays(3).toString()
-            "<T_IN_WEEK>" -> today.plusWeeks(1).toString()
-            "<T_IN_2_WEEKS>" -> today.plusWeeks(2).toString()
-            "<T_NEXT_WEEK>" -> today.plusWeeks(1).toString()
-            "<T_NEXT_MONTH>" -> today.plusMonths(1).toString()
-            "<T_THIS_WEEK>" -> today.toString()
-            "<T_THIS_MONTH>" -> today.toString()
-            "<T_MON>" -> nextWeekday(today, 1)
-            "<T_TUE>" -> nextWeekday(today, 2)
-            "<T_WED>" -> nextWeekday(today, 3)
-            "<T_THU>" -> nextWeekday(today, 4)
-            "<T_FRI>" -> nextWeekday(today, 5)
-            "<T_SAT>" -> nextWeekday(today, 6)
-            "<T_SUN>" -> nextWeekday(today, 7)
-            else -> null
+    /** Точное время: T_H15_00 → 15:00. */
+    private val exactTimeRegex = Regex("""T_H(\d{2})_(\d{2})""")
+
+    fun parse(frame: String, repository: AppointmentRepository): ParsedCommand {
+        val tokens = frame.split(" ").filter { it.isNotBlank() }
+
+        var intent = CommandType.UNKNOWN
+        var specialty: String? = null
+        var date: String? = null
+        var time: String? = null
+
+        for (tok in tokens) {
+            when {
+                tok == "<BOOK>" -> intent = CommandType.BOOK_SPECIFIC
+                tok == "<CANCEL>" -> intent = CommandType.CANCEL_ALL
+                tok == "<RESCHEDULE>" -> intent = CommandType.RESCHEDULE
+                tok == "<UNSUPPORTED>" -> intent = CommandType.UNKNOWN
+
+                tok in specialtyToName -> specialty = specialtyToName[tok]
+
+                tok == "T_TODAY" -> date = LocalDate.now().toString()
+                tok == "T_TOMORROW" -> date = LocalDate.now().plusDays(1).toString()
+                tok == "T_DAY_AFTER_TOMORROW" -> date = LocalDate.now().plusDays(2).toString()
+                tok == "T_IN_2_DAYS" -> date = LocalDate.now().plusDays(2).toString()
+                tok == "T_IN_3_DAYS" -> date = LocalDate.now().plusDays(3).toString()
+                tok == "T_IN_WEEK" -> date = LocalDate.now().plusWeeks(1).toString()
+                tok == "T_IN_2_WEEKS" -> date = LocalDate.now().plusWeeks(2).toString()
+                tok == "T_NEXT_WEEK" -> date = LocalDate.now().plusWeeks(1).toString()
+                tok == "T_NEXT_MONTH" -> date = LocalDate.now().plusMonths(1).toString()
+                tok == "T_MON" -> date = nextWeekday(DayOfWeek.MONDAY).toString()
+                tok == "T_TUE" -> date = nextWeekday(DayOfWeek.TUESDAY).toString()
+                tok == "T_WED" -> date = nextWeekday(DayOfWeek.WEDNESDAY).toString()
+                tok == "T_THU" -> date = nextWeekday(DayOfWeek.THURSDAY).toString()
+                tok == "T_FRI" -> date = nextWeekday(DayOfWeek.FRIDAY).toString()
+                tok == "T_SAT" -> date = nextWeekday(DayOfWeek.SATURDAY).toString()
+                tok == "T_SUN" -> date = nextWeekday(DayOfWeek.SUNDAY).toString()
+
+                else -> {
+                    // Точное время
+                    exactTimeRegex.find(tok)?.let { m ->
+                        time = "${m.groupValues[1]}:${m.groupValues[2]}"
+                        return@let
+                    }
+                    // Приблизительные периоды дня
+                    when (tok) {
+                        "T_MORNING" -> time = "09:00"
+                        "T_BEFORE_NOON" -> time = "11:00"
+                        "T_MIDDAY" -> time = "12:00"
+                        "T_AFTERNOON" -> time = "14:00"
+                        "T_EVENING" -> time = "18:00"
+                        "T_AFTER_WORK" -> time = "19:00"
+                        "T_AFTER_18" -> time = "18:30"
+                    }
+                }
+            }
         }
+
+        // Ищем врача по специальности
+        val doctor: Doctor? = specialty?.let { spec ->
+            repository.doctors.value.find {
+                it.specialty.equals(spec, ignoreCase = true)
+            }
+        }
+
+        return ParsedCommand(
+            type = intent,
+            doctor = doctor,
+            date = date,
+            time = time,
+            rawText = frame
+        )
     }
 
-    private fun nextWeekday(from: LocalDate, dayOfWeek: Int): String {
-        var date = from.plusDays(1)
-        while (date.dayOfWeek.value != dayOfWeek) {
-            date = date.plusDays(1)
-        }
-        return date.toString()
-    }
-
-    /**
-     * Возвращает время в формате "HH:mm" или null.
-     * Учитывает как точные часы (T_H15_00), так и обобщённые
-     * (T_AFTERNOON, T_MORNING, T_EVENING).
-     */
-    private fun mapTime(token: String): String? {
-        // Точное время: T_H15_00 → 15:00
-        val exact = Regex("""<T_H(\d{2})_(\d{2})>""").find(token)
-        if (exact != null) {
-            val h = exact.groupValues[1]
-            val m = exact.groupValues[2]
-            return "$h:$m"
-        }
-
-        // Обобщённые периоды дня
-        return when (token) {
-            "<T_MORNING>" -> "09:00"
-            "<T_BEFORE_NOON>" -> "11:00"
-            "<T_MIDDAY>" -> "12:00"
-            "<T_AFTERNOON>" -> "14:00"
-            "<T_EVENING>" -> "18:00"
-            "<T_AFTER_WORK>" -> "19:00"
-            "<T_AFTER_18>" -> "18:30"
-            else -> null
-        }
+    private fun nextWeekday(target: DayOfWeek): LocalDate {
+        var d = LocalDate.now().plusDays(1)
+        while (d.dayOfWeek != target) d = d.plusDays(1)
+        return d
     }
 }

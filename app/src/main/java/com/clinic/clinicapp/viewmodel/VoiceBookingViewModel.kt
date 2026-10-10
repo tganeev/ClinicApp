@@ -4,7 +4,8 @@ import android.app.Application
 import android.util.Log
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
-import com.clinic.clinicapp.data.nlu.NluEngine
+import com.clinic.clinicapp.data.nlu.ClinicNLU
+import com.clinic.clinicapp.data.nlu.FrameParser
 import com.clinic.clinicapp.data.repository.AppointmentRepository
 import com.clinic.clinicapp.data.voice.AudioRecorder
 import com.clinic.clinicapp.data.voice.SherpaSttEngine
@@ -58,7 +59,7 @@ class VoiceBookingViewModel(
     private val recorder = AudioRecorder()
     private val stt = SherpaSttEngine(app)
     private val tts = SpeechSynthesizer(app)
-    private val nlu = NluEngine(app)
+    private val nlu = ClinicNLU(app)
     private val regexParser = VoiceCommandParser(repository)
 
     /** Распознанная команда, ожидающая голосового подтверждения. */
@@ -74,17 +75,21 @@ class VoiceBookingViewModel(
                 _state.value = VoiceUiState.DownloadingModel(downloaded, total)
             }
 
-            Log.d(TAG, "Инициализация NLU...")
-            val nluOk = nlu.initialize { downloaded, total ->
-                _state.value = VoiceUiState.DownloadingModel(downloaded, total)
-            }
-
             Log.d(TAG, "Инициализация TTS...")
             val ttsOk = tts.initialize()
 
-            // STT критичен. NLU и TTS — опциональны.
+            Log.d(TAG, "Инициализация NLU...")
+            val nluOk = try {
+                nlu.initialize()
+                true
+            } catch (t: Throwable) {
+                Log.e(TAG, "NLU не инициализирован", t)
+                false
+            }
+
+            // STT критичен. Остальное — опционально.
             _state.value = if (sttOk) {
-                Log.d(TAG, "Все модели готовы: STT=$sttOk, NLU=$nluOk, TTS=$ttsOk")
+                Log.d(TAG, "Модели готовы: STT=$sttOk, NLU=$nluOk, TTS=$ttsOk")
                 VoiceUiState.Idle
             } else {
                 Log.e(TAG, "STT не загрузился")
@@ -92,6 +97,10 @@ class VoiceBookingViewModel(
             }
         }
     }
+
+    // ------------------------------------------------------------------------
+    // Запись голоса
+    // ------------------------------------------------------------------------
 
     fun startRecording() {
         Log.d(TAG, "startRecording called")
@@ -144,19 +153,18 @@ class VoiceBookingViewModel(
                 pendingCommand = parsed
                 _state.value = VoiceUiState.AwaitingConfirmation(parsed, question)
 
-                // Озвучиваем вопрос и слушаем ответ
-                Log.d(TAG, "Озвучивание вопроса: $question")
+                // Озвучиваем основную фразу и вопросительную часть отдельно,
+                // чтобы TTS поставил правильную интонацию на втором вызове.
+                Log.d(TAG, "Озвучивание: $question")
                 tts.speak(question)
 
-                // Короткая пауза, затем — вопросительная часть отдельным вызовом.
-                // Так TTS с большей вероятностью поставит вопросительную интонацию.
                 delay(250)
-                val confirmationQuestion = when (parsed.type) {
+                val confirmQuestion = when (parsed.type) {
                     CommandType.CANCEL_ALL, CommandType.CANCEL_ONE -> "Отменить?"
                     CommandType.BOOK_NEAREST, CommandType.BOOK_SPECIFIC -> "Записать вас?"
                     else -> "Подтверждаете?"
                 }
-                tts.speak(confirmationQuestion)
+                tts.speak(confirmQuestion)
 
                 delay(500)
                 listenForConfirmation()
@@ -168,19 +176,105 @@ class VoiceBookingViewModel(
         }
     }
 
-    /**
-     * Записывает ответ пользователя («да»/«нет») и обрабатывает его.
-     */
+    // ------------------------------------------------------------------------
+    // Парсинг текста: NLU → regex-fallback
+    // ------------------------------------------------------------------------
+
+    private fun parseText(text: String): ParsedCommand {
+        // Основной путь — NLU-модель
+        val frame = try {
+            nlu.parse(text)
+        } catch (t: Throwable) {
+            Log.e(TAG, "NLU упал, используем regex-fallback", t)
+            null
+        }
+
+        if (!frame.isNullOrBlank()) {
+            val parsed = FrameParser.parse(frame, repository)
+            if (parsed.type != CommandType.UNKNOWN) {
+                return parsed
+            }
+            Log.d(TAG, "NLU вернул фрейм, но FrameParser не распознал: $frame")
+        }
+
+        // Fallback: regex
+        Log.d(TAG, "NLU не справился, используем regex")
+        return regexParser.parse(text)
+    }
+
+    // ------------------------------------------------------------------------
+    // Формирование вопроса для TTS
+    // ------------------------------------------------------------------------
+
+    private fun buildConfirmationQuestion(cmd: ParsedCommand): String? {
+        return when (cmd.type) {
+            CommandType.CANCEL_ALL -> "Вы уверены, что хотите отменить все свои записи"
+
+            CommandType.BOOK_NEAREST -> {
+                val doctor = cmd.doctor
+                if (doctor == null) {
+                    "Записать вас на ближайшее свободное время"
+                } else {
+                    val nearest = repository.findNearestFreeSlotForDoctor(doctor.id)
+                    if (nearest == null) {
+                        "У врача ${doctor.name} сейчас нет свободных слотов"
+                    } else {
+                        val (foundDoctor, slot) = nearest
+                        val specialtyDative = SpecialtyDeclension.toDative(foundDoctor.specialty)
+                        val dateText = RussianDateFormatter.formatDate(slot.date)
+                        val timeText = RussianDateFormatter.formatTime(slot.time)
+                        "Ближайшая запись к $specialtyDative есть на $dateText на $timeText"
+                    }
+                }
+            }
+
+            CommandType.BOOK_SPECIFIC -> {
+                val doctor = cmd.doctor
+                val date = cmd.date
+                val time = cmd.time
+                when {
+                    doctor == null -> {
+                        Log.w(TAG, "Врач не найден")
+                        null
+                    }
+                    date == null || time == null -> {
+                        // Пользователь не назвал время — ищем ближайшее у этого врача
+                        Log.d(TAG, "Время не указано, ищем ближайшее у ${doctor.name}")
+                        val nearest = repository.findNearestFreeSlotForDoctor(doctor.id)
+                        if (nearest == null) {
+                            "У врача ${doctor.name} сейчас нет свободных слотов"
+                        } else {
+                            val (foundDoctor, slot) = nearest
+                            val specialtyDative = SpecialtyDeclension.toDative(foundDoctor.specialty)
+                            val dateText = RussianDateFormatter.formatDate(slot.date)
+                            val timeText = RussianDateFormatter.formatTime(slot.time)
+                            "Ближайшая запись к $specialtyDative есть на $dateText на $timeText"
+                        }
+                    }
+                    else -> {
+                        val specialtyDative = SpecialtyDeclension.toDative(doctor.specialty)
+                        val dateText = RussianDateFormatter.formatDate(date)
+                        val timeText = RussianDateFormatter.formatTime(time)
+                        "Записать вас к $specialtyDative на $dateText на $timeText"
+                    }
+                }
+            }
+
+            else -> null
+        }
+    }
+
+    // ------------------------------------------------------------------------
+    // Голосовое подтверждение (ответ «да/нет»)
+    // ------------------------------------------------------------------------
+
     private suspend fun listenForConfirmation() {
         _state.value = VoiceUiState.ListeningConfirmation
 
         try {
             Log.d(TAG, "Начинаем слушать ответ...")
             recorder.start()
-
-            // Слушаем 3 секунды
             delay(3000)
-
             val answerSamples = recorder.stop()
             Log.d(TAG, "Сэмплов ответа: ${answerSamples.size}")
 
@@ -209,7 +303,6 @@ class VoiceBookingViewModel(
         }
     }
 
-    /** Проверяет, что ответ — «да». */
     private fun isAffirmative(text: String): Boolean {
         val yesWords = listOf(
             "да", "ага", "угу", "конечно", "верно", "правильно",
@@ -219,7 +312,6 @@ class VoiceBookingViewModel(
         return yesWords.any { text.contains(it) }
     }
 
-    /** Проверяет, что ответ — «нет». */
     private fun isNegative(text: String): Boolean {
         val noWords = listOf(
             "нет", "не надо", "не нужно", "отмена", "отменить",
@@ -228,89 +320,10 @@ class VoiceBookingViewModel(
         return noWords.any { text.contains(it) }
     }
 
-    /**
-     * Формирует текст вопроса для TTS.
-     * Возвращает null, если команда не распознана или не поддерживается.
-     */
-    private fun buildConfirmationQuestion(cmd: ParsedCommand): String? {
-        return when (cmd.type) {
-            CommandType.CANCEL_ALL -> "Вы уверены, что хотите свои записи"
+    // ------------------------------------------------------------------------
+    // Выполнение команды после подтверждения
+    // ------------------------------------------------------------------------
 
-            CommandType.BOOK_NEAREST -> {
-                val doctor = cmd.doctor
-                if (doctor == null) {
-                    "Записать вас на ближайшее свободное время?"
-                } else {
-                    val nearest = repository.findNearestFreeSlotForDoctor(doctor.id)
-                    if (nearest == null) {
-                        "У врача ${doctor.name} сейчас нет свободных слотов. Скажите нет, чтобы отменить."
-                    } else {
-                        val (foundDoctor, slot) = nearest
-
-                        // Склоняем специальность: «Кардиолог» → «кардиологу»
-                        val specialtyDative = SpecialtyDeclension.toDative(foundDoctor.specialty)
-
-                        // Преобразуем дату и время в человекочитаемый вид
-                        val dateText = RussianDateFormatter.formatDate(slot.date)
-                        val timeText = RussianDateFormatter.formatTime(slot.time)
-
-                        "Ближайшая запись к $specialtyDative есть на $dateText на $timeText."
-                    }
-                }
-            }
-
-            CommandType.BOOK_SPECIFIC -> {
-                val doctor = cmd.doctor
-                val date = cmd.date
-                val time = cmd.time
-                if (doctor == null || date == null || time == null) {
-                    Log.w(TAG, "Не хватает данных: doctor=$doctor, date=$date, time=$time")
-                    null
-                } else {
-                    val specialtyDative = SpecialtyDeclension.toDative(doctor.specialty)
-                    val dateText = RussianDateFormatter.formatDate(date)
-                    val timeText = RussianDateFormatter.formatTime(time)
-                    "Записать вас к $specialtyDative на $dateText на $timeText?"
-                }
-            }
-
-            else -> null
-        }
-    }
-
-    /**
-     * Парсит текст: сначала NLU, при неудаче — regex-fallback.
-     */
-    private suspend fun parseText(text: String): ParsedCommand {
-        val nluResult = try {
-            nlu.parse(text)
-        } catch (t: Throwable) {
-            Log.e(TAG, "NLU упал, используем regex-fallback", t)
-            null
-        }
-
-        if (nluResult != null && nluResult.intent != CommandType.UNKNOWN) {
-            val doctor = nluResult.specialty?.let { spec ->
-                repository.doctors.value.find {
-                    it.specialty.equals(spec, ignoreCase = true)
-                }
-            }
-            return ParsedCommand(
-                type = nluResult.intent,
-                doctor = doctor,
-                date = nluResult.date,
-                time = nluResult.time,
-                rawText = text
-            )
-        }
-
-        Log.d(TAG, "NLU не справился, используем regex")
-        return regexParser.parse(text)
-    }
-
-    /**
-     * Выполняет распознанную команду после подтверждения «да».
-     */
     private fun confirmVoice() {
         val cmd = pendingCommand
         if (cmd == null) {
@@ -323,14 +336,11 @@ class VoiceBookingViewModel(
             CommandType.CANCEL_ALL, CommandType.CANCEL_ONE -> {
                 val count = repository.cancelAllAppointments()
                 Log.d(TAG, "cancelled $count appointments")
-                viewModelScope.launch {
-                    tts.speak("Все записи отменены")
-                }
+                viewModelScope.launch { tts.speak("Все записи отменены") }
                 _state.value = VoiceUiState.Cancelled(count)
             }
 
             CommandType.BOOK_NEAREST -> {
-                // Если в команде указан врач — ищем у него. Иначе — любой ближайший.
                 val nearest = if (cmd.doctor != null) {
                     Log.d(TAG, "Ищем ближайший слот у врача: ${cmd.doctor.name}")
                     repository.findNearestFreeSlotForDoctor(cmd.doctor.id)
@@ -351,9 +361,7 @@ class VoiceBookingViewModel(
                 val (doctor, slot) = nearest
                 val ok = repository.book(doctor.id, slot.id)
                 _state.value = if (ok) {
-                    viewModelScope.launch {
-                        tts.speak("Запись оформлена")
-                    }
+                    viewModelScope.launch { tts.speak("Запись оформлена") }
                     VoiceUiState.Booked(doctor.name, slot.date, slot.time)
                 } else {
                     VoiceUiState.Error("Не удалось записаться")
@@ -364,10 +372,32 @@ class VoiceBookingViewModel(
                 val doctor = cmd.doctor
                 val date = cmd.date
                 val time = cmd.time
-                if (doctor == null || date == null || time == null) {
-                    _state.value = VoiceUiState.Error("Не хватает данных для записи")
+
+                if (doctor == null) {
+                    _state.value = VoiceUiState.Error("Врач не найден")
                     return
                 }
+
+                // Если дата/время не указаны — ищем ближайший слот у этого врача
+                if (date == null || time == null) {
+                    Log.d(TAG, "Дата/время не указаны, используем ближайший слот у ${doctor.name}")
+                    val nearest = repository.findNearestFreeSlotForDoctor(doctor.id)
+                    if (nearest == null) {
+                        _state.value = VoiceUiState.Error("Нет свободных слотов у ${doctor.name}")
+                        return
+                    }
+                    val (foundDoctor, slot) = nearest
+                    val ok = repository.book(foundDoctor.id, slot.id)
+                    _state.value = if (ok) {
+                        viewModelScope.launch { tts.speak("Запись оформлена") }
+                        VoiceUiState.Booked(foundDoctor.name, slot.date, slot.time)
+                    } else {
+                        VoiceUiState.Error("Не удалось записаться")
+                    }
+                    return
+                }
+
+                // Обычный путь — есть и дата, и время
                 val slot = doctor.availableSlots.find {
                     it.date == date && it.time == time && it.isAvailable
                 }
@@ -377,9 +407,7 @@ class VoiceBookingViewModel(
                 }
                 val ok = repository.book(doctor.id, slot.id)
                 _state.value = if (ok) {
-                    viewModelScope.launch {
-                        tts.speak("Запись оформлена")
-                    }
+                    viewModelScope.launch { tts.speak("Запись оформлена") }
                     VoiceUiState.Booked(doctor.name, date, time)
                 } else {
                     VoiceUiState.Error("Не удалось создать запись")
@@ -396,7 +424,10 @@ class VoiceBookingViewModel(
         }
     }
 
-    /** Сбросить состояние. */
+    // ------------------------------------------------------------------------
+    // Утилита
+    // ------------------------------------------------------------------------
+
     fun reset() {
         Log.d(TAG, "reset")
         pendingCommand = null
@@ -405,8 +436,8 @@ class VoiceBookingViewModel(
 
     override fun onCleared() {
         stt.release()
-        nlu.release()
         tts.release()
+        nlu.release()
         super.onCleared()
     }
 }

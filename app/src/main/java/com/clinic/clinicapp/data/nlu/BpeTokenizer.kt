@@ -2,269 +2,182 @@ package com.clinic.clinicapp.data.nlu
 
 import android.content.Context
 import android.util.Log
-import kotlinx.serialization.json.Json
-import kotlinx.serialization.json.JsonArray
-import kotlinx.serialization.json.JsonObject
-import kotlinx.serialization.json.contentOrNull
-import kotlinx.serialization.json.int
-import kotlinx.serialization.json.jsonArray
-import kotlinx.serialization.json.jsonObject
-import kotlinx.serialization.json.jsonPrimitive
+import org.json.JSONArray
+import org.json.JSONObject
 
 /**
  * BPE-токенизатор, совместимый с HuggingFace ByteLevel BPE.
- * Читает tokenizer.json, хранит vocab и merges.
  *
- * ВАЖНО: ByteLevel BPE работает с байтами UTF-8, а не с символами.
- * Порядок: текст → UTF-8 байты → ByteLevel-символы → BPE-слияния → ID.
+ * Точный порт логики из train/tokenizer_train.py (HF tokenizers).
+ * Отличия от «наивной» реализации:
+ *  - regex-претокенайзер HF (splitRegex), а не split(" ")
+ *  - byteToUni использует инкремент n ТОЛЬКО для непечатных байтов
+ *  - спецтокены обрабатываются ДО BPE и не токенизируются текстом
  */
 class BpeTokenizer private constructor(
     private val vocab: Map<String, Int>,
-    private val merges: Map<Pair<String, String>, Int>,
-    private val addedTokens: Map<String, Int>
+    private val ranks: Map<Pair<String, String>, Int>,
+    private val added: List<Pair<String, Int>>,
+    private val byteToUni: Map<Int, String>
 ) {
 
     companion object {
         private const val TAG = "BpeTokenizer"
 
-        /** Загружает tokenizer.json из assets. */
         fun fromAssets(context: Context, path: String = "nlu/tokenizer.json"): BpeTokenizer {
             val json = context.assets.open(path).bufferedReader(Charsets.UTF_8).use { it.readText() }
             return fromJson(json)
         }
 
-        /** Загружает tokenizer.json с диска. */
         fun fromFile(file: java.io.File): BpeTokenizer {
             return fromJson(file.readText(Charsets.UTF_8))
         }
 
         private fun fromJson(json: String): BpeTokenizer {
-            // Отключаем строгий режим: некоторые ключи могут не соответствовать
-            // нашей модели данных, но нам нужны только vocab и merges.
-            val parser = Json { ignoreUnknownKeys = true; isLenient = true }
-            val root = parser.parseToJsonElement(json).jsonObject
-            val model = root["model"]!!.jsonObject
+            val root = JSONObject(json)
+            val model = root.getJSONObject("model")
 
-            // ---- vocab: {"<PAD>": 0, "при": 163, ...} ----
-            val vocabObj = model["vocab"]!!.jsonObject
-            val vocab = HashMap<String, Int>(vocabObj.size)
-            for ((key, value) in vocabObj) {
-                vocab[key] = value.jsonPrimitive.int
+            // ---- vocab ----
+            val vocabObj = model.getJSONObject("vocab")
+            val vocab = HashMap<String, Int>(vocabObj.length())
+            vocabObj.keys().forEach { key ->
+                vocab[key] = vocabObj.getInt(key)
             }
 
-            // ---- merges: [["а","б"], ["аб","в"], ...] ----
-            // Внимание: в одних версиях HF merges — массив пар-массивов,
-            // в других — массив строк "а б". Поддерживаем оба формата.
-            val mergesArr = model["merges"]!!.jsonArray
-            val merges = HashMap<Pair<String, String>, Int>(mergesArr.size)
-            mergesArr.forEachIndexed { index, element ->
-                when (element) {
-                    is JsonArray -> {
-                        // Формат: ["а", "б"]
-                        val a = element.getOrNull(0)?.jsonPrimitive?.contentOrNull ?: return@forEachIndexed
-                        val b = element.getOrNull(1)?.jsonPrimitive?.contentOrNull ?: return@forEachIndexed
-                        merges[a to b] = index
+            // ---- merges: массив строк "a b" или пар-массивов ----
+            val mergesArr = model.getJSONArray("merges")
+            val ranks = HashMap<Pair<String, String>, Int>(mergesArr.length())
+            for (i in 0 until mergesArr.length()) {
+                val el = mergesArr.get(i)
+                when (el) {
+                    is JSONArray -> {
+                        val a = el.optString(0, null) ?: continue
+                        val b = el.optString(1, null) ?: continue
+                        ranks[a to b] = i
                     }
-                    is kotlinx.serialization.json.JsonPrimitive -> {
-                        // Формат: "а б"
-                        val str = element.contentOrNull ?: return@forEachIndexed
-                        val parts = str.split(" ", limit = 2)
-                        if (parts.size == 2) {
-                            merges[parts[0] to parts[1]] = index
-                        }
+                    is String -> {
+                        val parts = el.split(" ", limit = 2)
+                        if (parts.size == 2) ranks[parts[0] to parts[1]] = i
                     }
-                    else -> { /* игнорируем */ }
                 }
             }
 
-            // ---- added_tokens (специальные) ----
-            val added = HashMap<String, Int>()
-            (root["added_tokens"] as? JsonArray)?.forEach { el ->
-                val obj = el as? JsonObject ?: return@forEach
-                val content = obj["content"]?.jsonPrimitive?.contentOrNull ?: return@forEach
-                val id = obj["id"]?.jsonPrimitive?.int ?: return@forEach
-                added[content] = id
-            }
-
-            Log.d(TAG, "Токенизатор загружен: vocab=${vocab.size}, merges=${merges.size}, added=${added.size}")
-            return BpeTokenizer(vocab, merges, added)
-        }
-    }
-
-    /**
-     * Отладочная функция: кодирует текст и возвращает читаемое представление
-     * каждого токена с его ID.
-     */
-    fun debugEncode(text: String): String {
-        val sb = StringBuilder()
-        sb.append("Текст: «$text»\n")
-
-        val words = text.lowercase().trim().split(Regex("\\s+"))
-        var totalIds = 0
-        for (word in words) {
-            if (word.isEmpty()) continue
-            val bytes = word.toByteArray(Charsets.UTF_8)
-            val chars = bytes.map { byteToPrintableChar(it) }
-            val merged = applyBpe(chars)
-            val ids = merged.mapNotNull { unit -> vocab[unit] }
-            totalIds += ids.size
-
-            sb.append("  слово «$word»:\n")
-            sb.append("    ByteLevel-символы: ${chars.joinToString(" ") { "'$it'" }}\n")
-            sb.append("    BPE-юниты: ${merged.joinToString(" ") { "'$it'" }}\n")
-            sb.append("    ID: $ids\n")
-            sb.append("    Токены: ${ids.map { id -> tokenOf(id.toLong()) ?: "?" }}\n")
-        }
-        sb.append("Всего токенов: $totalIds")
-        return sb.toString()
-    }
-
-    /**
-     * Кодирует текст БЕЗ специальных токенов.
-     * Возвращает только ID токенов текста (для промпта TFLite-модели).
-     */
-    fun encodeText(text: String): List<Int> {
-        val result = ArrayList<Int>()
-        val words = text.lowercase().trim().split(Regex("\\s+"))
-        for (word in words) {
-            if (word.isEmpty()) continue
-            result.addAll(encodeWord(word))
-        }
-        return result
-    }
-
-    /**
-     * Кодирует текст в массив ID длиной maxLength.
-     * Схема: [<BOS>] + токены текста + [<EOS>] + [<PAD>...].
-     */
-    fun encode(text: String, maxLength: Int = 128): LongArray {
-        val result = ArrayList<Long>(maxLength)
-
-        // <BOS>
-        val bosId = idOf("<BOS>") ?: 2
-        result += bosId.toLong()
-
-        // Токенизируем текст по словам
-        val words = text.lowercase().trim().split(Regex("\\s+"))
-        for (word in words) {
-            if (word.isEmpty()) continue
-            val ids = encodeWord(word)
-            for (id in ids) {
-                if (result.size >= maxLength - 1) break
-                result += id.toLong()
-            }
-            if (result.size >= maxLength - 1) break
-        }
-
-        // <EOS>
-        if (result.size < maxLength) {
-            val eosId = idOf("<EOS>") ?: 3
-            result += eosId.toLong()
-        }
-
-        // <PAD> до maxLength
-        val padId = idOf("<PAD>") ?: 0
-        while (result.size < maxLength) {
-            result += padId.toLong()
-        }
-
-        return result.toLongArray()
-    }
-
-    /**
-     * Кодирует одно слово через ByteLevel BPE.
-     * 1. UTF-8 байты
-     * 2. ByteLevel-маппинг (байт → печатный символ)
-     * 3. BPE-слияния
-     * 4. Маппинг юнитов в ID
-     */
-    private fun encodeWord(word: String): List<Int> {
-        // 1. UTF-8 байты
-        val bytes = word.toByteArray(Charsets.UTF_8)
-
-        // 2. ByteLevel: каждый байт → один печатный Unicode-символ
-        val chars = bytes.map { byteToPrintableChar(it) }
-
-        // 3. BPE-слияния
-        val merged = applyBpe(chars)
-
-        // 4. В ID
-        return merged.mapNotNull { unit -> vocab[unit] }
-    }
-
-    /**
-     * ByteLevel-маппинг: байт 0..255 → «печатный» Unicode-символ.
-     * Соответствует логике `bytes_to_unicode` из GPT-2 / HuggingFace.
-     */
-    private fun byteToPrintableChar(byte: Byte): String {
-        val b = byte.toInt() and 0xFF
-
-        // bs = список «непечатных» байтов, которые надо сдвинуть
-        val bs = listOf(
-            0..32, 127..160, 173..173
-        ).flatten().toSet()
-
-        return if (b in bs) {
-            // Сдвигаем в диапазон печатных символов
-            String(Character.toChars(b + 256))
-        } else {
-            // Оставляем как есть
-            b.toChar().toString()
-        }
-    }
-
-    /**
-     * Жадный BPE: пока есть слияния, применяем пару с минимальным rank.
-     */
-    private fun applyBpe(chars: List<String>): List<String> {
-        if (chars.size <= 1) return chars
-        var symbols = chars.toMutableList()
-
-        while (true) {
-            var bestPair: Pair<String, String>? = null
-            var bestRank = Int.MAX_VALUE
-
-            for (i in 0 until symbols.size - 1) {
-                val pair = symbols[i] to symbols[i + 1]
-                val rank = merges[pair] ?: continue
-                if (rank < bestRank) {
-                    bestRank = rank
-                    bestPair = pair
+            // ---- added_tokens ----
+            val added = mutableListOf<Pair<String, Int>>()
+            val addedArr = root.optJSONArray("added_tokens")
+            if (addedArr != null) {
+                for (i in 0 until addedArr.length()) {
+                    val obj = addedArr.getJSONObject(i)
+                    val content = obj.optString("content", null) ?: continue
+                    val id = obj.optInt("id", -1).takeIf { it >= 0 } ?: continue
+                    added += content to id
                 }
             }
+            // Сортируем по убыванию длины — длинные спецтокены матчатся первыми
+            val sortedAdded = added.sortedByDescending { it.first.length }
 
-            val pair = bestPair ?: break
+            // ---- byte → unicode (точная логика bytes_to_unicode из GPT-2) ----
+            val bs = buildList {
+                addAll(33..126)     // '!'..'~'
+                addAll(161..172)    // '¡'..'¬'
+                addAll(174..255)    // '®'..'ÿ'
+            }.toSet()
 
-            // Сливаем все вхождения выбранной пары
-            val merged = ArrayList<String>(symbols.size)
-            var i = 0
-            while (i < symbols.size) {
-                if (i < symbols.size - 1 &&
-                    symbols[i] == pair.first &&
-                    symbols[i + 1] == pair.second
-                ) {
-                    merged += pair.first + pair.second
-                    i += 2
+            var n = 0
+            val byteToUni = HashMap<Int, String>(256)
+            for (b in 0..255) {
+                byteToUni[b] = if (b in bs) {
+                    b.toChar().toString()
                 } else {
-                    merged += symbols[i]
-                    i += 1
+                    (256 + n++).toChar().toString()
                 }
             }
-            symbols = merged
-            if (symbols.size == 1) break
-        }
 
-        return symbols
+            Log.d(TAG, "Токенизатор загружен: vocab=${vocab.size}, merges=${ranks.size}, added=${sortedAdded.size}")
+            return BpeTokenizer(vocab, ranks, sortedAdded, byteToUni)
+        }
     }
 
-    /** ID токена по его строке (для специальных токенов). */
-    fun idOf(token: String): Int? = addedTokens[token] ?: vocab[token]
+    private val splitRegex = Regex(
+        "'s|'t|'re|'ve|'m|'ll|'d| ?\\p{L}+| ?\\p{N}+| ?[^\\s\\p{L}\\p{N}]+|\\s+(?!\\S)|\\s+"
+    )
 
-    /** Строка токена по ID. */
-    fun tokenOf(id: Long): String? {
-        val i = id.toInt()
-        // Сначала специальные, потом обычные
-        addedTokens.entries.find { it.value == i }?.let { return it.key }
-        return vocab.entries.find { it.value == i }?.key
+    /**
+     * Кодирует текст в последовательность BPE-ids.
+     * Спецтокены вырезаются ДО BPE.
+     */
+    fun encode(text: String): List<Int> {
+        val out = ArrayList<Int>()
+        var rest = text
+
+        // 1) Спецтокены (ищем вхождения в начале строки рекурсивно)
+        while (rest.isNotEmpty()) {
+            val hit = added.firstOrNull { it.first.length > 1 && rest.startsWith(it.first) }
+            if (hit == null) break
+            out.add(hit.second)
+            rest = rest.substring(hit.first.length)
+        }
+
+        // 2) Regex-сплит + byte-level + BPE
+        for (piece in splitRegex.findAll(rest).map { it.value }) {
+            if (piece.isEmpty()) continue
+
+            // Byte-level: каждый байт UTF-8 → печатный символ
+            var syms = piece.toByteArray(Charsets.UTF_8)
+                .map { b -> byteToUni[b.toInt() and 0xFF]!! }
+                .toMutableList()
+
+            if (syms.isEmpty()) continue
+
+            // BPE-слияния: жадный выбор пары с минимальным рангом
+            while (syms.size > 1) {
+                var best: Pair<String, String>? = null
+                var bestRank = Int.MAX_VALUE
+                for (i in 0 until syms.size - 1) {
+                    val pair = syms[i] to syms[i + 1]
+                    val r = ranks[pair] ?: continue
+                    if (r < bestRank) {
+                        bestRank = r
+                        best = pair
+                    }
+                }
+                val chosen = best ?: break
+
+                val merged = ArrayList<String>(syms.size)
+                var i = 0
+                while (i < syms.size) {
+                    if (i < syms.size - 1 &&
+                        syms[i] == chosen.first &&
+                        syms[i + 1] == chosen.second
+                    ) {
+                        merged += chosen.first + chosen.second
+                        i += 2
+                    } else {
+                        merged += syms[i]
+                        i += 1
+                    }
+                }
+                syms = merged
+            }
+
+            // Финальные юниты → ID
+            for (s in syms) {
+                val id = vocab[s] ?: vocab["<UNK>"]
+                if (id != null) out.add(id)
+            }
+        }
+        return out
+    }
+
+    /** ID по строке токена (спецтокены и обычные). */
+    fun idOf(token: String): Int? {
+        added.firstOrNull { it.first == token }?.let { return it.second }
+        return vocab[token]
+    }
+
+    /** Строка по ID. */
+    fun tokenOf(id: Int): String? {
+        added.firstOrNull { it.second == id }?.let { return it.first }
+        return vocab.entries.firstOrNull { it.value == id }?.key
     }
 }

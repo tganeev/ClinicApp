@@ -3,268 +3,131 @@ package com.clinic.clinicapp.data.nlu
 import android.util.Log
 
 /**
- * Constrained decoding: генерация фрейма токенов с маской допустимых токенов.
+ * Constrained decoding: маска допустимых токенов для каждого состояния.
+ * Точный порт train/constrained.py на Kotlin.
+ *
  * Гарантирует синтаксически валидный фрейм.
  *
- * Полная версия автомата — см. train/constrained.py в репозитории модели.
- * Здесь портирован базовый вариант для BOOK/CANCEL/RESCHEDULE.
+ * Ключевые правила:
+ *  - INTENT: только 4 интента.
+ *  - SPECIALTY: 10 специальностей.
+ *  - TIME: либо <T_UNKNOWN> → SYMPTOMS, либо <TIME> → FACTORS.
+ *  - FACTORS: только токены с rank > lastRank (ОБЛАСТЬ 0 < ДЕНЬ 1 < ВРЕМЯ 2).
+ *             Закрыть слот можно только после выбора хотя бы одного фактора.
+ *  - SYMPTOMS: любое число разных симптомов, затем <END_FRAME> или
+ *              <NEEDS_CLARIFICATION>.
  */
-class FrameAutomaton(
-    private val tokenizer: BpeTokenizer,
-    private val eosId: Int,
-    private val padId: Int,
-    private val assistantId: Int,
-    private val userId: Int,
-    private val bosId: Int
-) {
+class FrameAutomaton(private val idOf: (String) -> Int?) {
 
     private val TAG = "FrameAutomaton"
 
-    companion object {
-        private const val MAX_STEPS = 24
-        private const val CONTEXT_SIZE = 128
-
-        // Специальные токены (id берутся из tokenizer.json)
-        private const val TOKEN_INTENT_BOOK = "<BOOK>"
-        private const val TOKEN_INTENT_CANCEL = "<CANCEL>"
-        private const val TOKEN_INTENT_RESCHEDULE = "<RESCHEDULE>"
-        private const val TOKEN_INTENT_UNSUPPORTED = "<UNSUPPORTED>"
-        private const val TOKEN_TIME_OPEN = "<TIME>"
-        private const val TOKEN_TIME_CLOSE = "</TIME>"
-        private const val TOKEN_END_FRAME = "<END_FRAME>"
-
-        // Список специальностей
-        private val SPECIALTY_TOKENS = listOf(
-            "<GP>", "<DENTIST>", "<DERMATOLOGIST>", "<GYNECOLOGIST>",
-            "<OPHTHALMOLOGIST>", "<NEUROLOGIST>", "<PSYCHOLOGIST>",
-            "<SURGEON>", "<ENT>", "<UNKNOWN_SPECIALTY>"
-        )
-
-        // Список токенов времени (факторные категории)
-        private val TIME_TOKENS = listOf(
-            "<T_UNKNOWN>", "<T_AMBIG>",
-            "T_TODAY", "T_TOMORROW", "T_DAY_AFTER_TOMORROW",
-            "T_IN_2_DAYS", "T_IN_3_DAYS", "T_IN_WEEK", "T_IN_2_WEEKS",
-            "T_NEXT_WEEK", "T_NEXT_MONTH", "T_THIS_WEEK", "T_THIS_MONTH",
-            "T_MON", "T_TUE", "T_WED", "T_THU", "T_FRI", "T_SAT", "T_SUN",
-            "T_MORNING", "T_BEFORE_NOON", "T_MIDDAY", "T_AFTERNOON",
-            "T_EVENING", "T_AFTER_WORK", "T_AFTER_18",
-            "T_H08_00", "T_H08_30", "T_H09_00", "T_H09_30", "T_H10_00",
-            "T_H11_00", "T_H13_00", "T_H14_00", "T_H15_00", "T_H16_00",
-            "T_H17_00", "T_H17_30", "T_H18_00", "T_H18_30", "T_H19_00",
-            "T_H20_00", "T_H21_00", "T_H22_00"
-        )
+    private enum class S {
+        INTENT, SPECIALTY, TIME, FACTORS, SYMPTOMS, CLARIF, END_FRAME, DONE
     }
 
-    /**
-     * Генерирует фрейм для указанного текста.
-     */
-    fun generate(
-        forward: (LongArray) -> FloatArray,
-        text: String,
-        tokenizer: BpeTokenizer
-    ): Pair<String, LongArray> {
-        // 1. Токенизируем текст
-        val textIds = tokenizer.encodeText(text)
-        Log.d(TAG, "Текст: «$text»")
-        Log.d(TAG, "Токены текста (${textIds.size}): ${textIds.map { tokenizer.tokenOf(it.toLong()) }}")
+    private var state = S.INTENT
+    private var lastRank = -1
+    private var emitted = 0
+    private val symptoms = mutableSetOf<String>()
 
-        // 2. Собираем промпт
-        val seq = ArrayList<Long>(CONTEXT_SIZE)
-        seq += bosId.toLong()
-        seq += userId.toLong()
-        seq.addAll(textIds.map { it.toLong() })
-        seq += assistantId.toLong()
-
-        Log.d(TAG, "Промпт: [BOS=${bosId}] [USER=${userId}] " +
-                "${textIds.map { tokenizer.tokenOf(it.toLong()) }} [ASSISTANT=${assistantId}]")
-        Log.d(TAG, "Длина промпта: ${seq.size}")
-
-        // 3. Жадная генерация с маской
-        val generated = ArrayList<Long>()
-        var state = State.INTENT
-
-        for (step in 0 until MAX_STEPS) {
-            if (seq.size >= CONTEXT_SIZE) {
-                Log.d(TAG, "Шаг $step: достигнут лимит контекста")
-                break
-            }
-
-            val input = LongArray(CONTEXT_SIZE) { padId.toLong() }
-            for (i in seq.indices) input[i] = seq[i]
-
-            val logits = forward(input)
-
-            // Маскируем запрещённые токены
-            val allowed = allowedTokensFor(state)
-            val allowedNames = allowed.mapNotNull { id -> tokenizer.tokenOf(id.toLong()) }
-
-            Log.d(TAG, "Шаг $step: state=$state, разрешено ${allowed.size} токенов: $allowedNames")
-
-            // Смотрим логиты для всех разрешённых токенов и для EOS
-            val scoresLog = StringBuilder("  Логиты разрешённых: ")
-            for (id in allowed) {
-                val name = tokenizer.tokenOf(id.toLong()) ?: "?"
-                scoresLog.append("$name=${"%.3f".format(logits[id])} ")
-            }
-            scoresLog.append(" | EOS=${"%.3f".format(logits[eosId])}")
-            Log.d(TAG, scoresLog.toString())
-
-            // argmax
-            val next = argmaxWithMask(logits, allowed)
-            val nextName = tokenizer.tokenOf(next.toLong()) ?: "<UNK:$next>"
-
-            Log.d(TAG, "Шаг $step: выбран $nextName (id=$next)")
-
-            if (next == eosId) {
-                Log.d(TAG, "EOS на шаге $step")
-                break
-            }
-
-            seq += next.toLong()
-            generated += next.toLong()
-
-            val prevState = state
-            state = nextState(state, next)
-            Log.d(TAG, "Шаг $step: переход $prevState → $state")
-        }
-
-        val frame = generated.joinToString(" ") { id ->
-            tokenizer.tokenOf(id) ?: "<UNK:$id>"
-        }
-        Log.d(TAG, "Итоговый Frame: $frame")
-
-        return frame to generated.toLongArray()
+    private fun rank(t: String): Int = when (t) {
+        in FrameVocab.TIME_SCOPE -> 0
+        in FrameVocab.TIME_DAY -> 1
+        else -> 2
     }
 
-    /**
-     * Состояния автомата.
-     */
-    private enum class State {
-        INTENT,
-        SPECIALTY,
-        TIME,
-        SYMPTOMS,
-        CLARIFICATION,
-        END_FRAME,
-        DONE
-    }
+    private fun ids(ts: Collection<String>): Set<Int> =
+        ts.mapNotNull { idOf(it) }.toSet()
 
-    /**
-     * Возвращает список ID токенов, разрешённых в текущем состоянии.
-     */
-    private fun allowedTokensFor(state: State): Set<Int> {
-        val ids = mutableSetOf<Int>()
+    /** Возвращает текущее множество разрешённых ID токенов. */
+    fun allowed(): Set<Int> = when (state) {
+        S.INTENT -> ids(FrameVocab.INTENTS)
 
-        fun add(token: String) {
-            tokenizer.idOf(token)?.let { ids += it }
+        S.SPECIALTY -> ids(FrameVocab.SPECIALTY)
+
+        S.TIME -> ids(listOf("<T_UNKNOWN>", "<TIME>"))
+
+        S.FACTORS -> {
+            val ok = (FrameVocab.TIME_SCOPE + FrameVocab.TIME_DAY + FrameVocab.TIME_OF_DAY)
+                .filter { rank(it) > lastRank }
+            val base = ids(ok)
+            if (emitted > 0) {
+                val closeId = idOf("</TIME>")
+                if (closeId != null) base + closeId else base
+            } else base
         }
 
-        when (state) {
-            State.INTENT -> {
-                add(TOKEN_INTENT_BOOK)
-                add(TOKEN_INTENT_CANCEL)
-                add(TOKEN_INTENT_RESCHEDULE)
-                add(TOKEN_INTENT_UNSUPPORTED)
-            }
-
-            State.SPECIALTY -> {
-                SPECIALTY_TOKENS.forEach { add(it) }
-            }
-
-            State.TIME -> {
-                // Открытие/закрытие слота времени
-                add(TOKEN_TIME_OPEN)
-                add(TOKEN_TIME_CLOSE)
-                // Факторы времени
-                TIME_TOKENS.forEach { add(it) }
-            }
-
-            State.SYMPTOMS -> {
-                // Симптомы + служебные
-                add("<SYMPTOM_TOOTHACHE>")
-                add("<SYMPTOM_SORE_THROAT>")
-                add("<SYMPTOM_FEVER>")
-                add("<SYMPTOM_RASH>")
-                add("<SYMPTOM_BACK_PAIN>")
-                add("<SYMPTOM_HEADACHE>")
-                add("<SYMPTOM_EYE_PAIN>")
-                add("<SYMPTOM_ANXIETY>")
-                add("<SYMPTOM_COUGH>")
-                add("<SYMPTOM_STOMACH_PAIN>")
-                add("<SYMPTOM_DIZZINESS>")
-                add("<SYMPTOM_INSOMNIA>")
-                add("<SYMPTOM_ALLERGY>")
-                add("<NEEDS_CLARIFICATION>")
-                add(TOKEN_END_FRAME)
-            }
-
-            State.CLARIFICATION -> {
-                add(TOKEN_END_FRAME)
-            }
-
-            State.END_FRAME -> {
-                add("<EOS>")
-            }
-
-            State.DONE -> {
-                // Ничего не разрешаем — генерация должна остановиться
-                add("<EOS>")
-            }
+        S.SYMPTOMS -> {
+            val remaining = FrameVocab.SYMPTOMS.filter { it !in symptoms }
+            val base = ids(remaining).toMutableSet()
+            idOf("<NEEDS_CLARIFICATION>")?.let { base += it }
+            idOf("<END_FRAME>")?.let { base += it }
+            base
         }
 
-        return ids
+        S.CLARIF -> setOfNotNull(idOf("<END_FRAME>"))
+        S.END_FRAME -> setOfNotNull(idOf("<EOS>"))
+        S.DONE -> setOfNotNull(idOf("<EOS>"))
     }
 
-    /**
-     * Argmax логитов с маской.
-     */
-    private fun argmaxWithMask(logits: FloatArray, allowed: Set<Int>): Int {
-        var bestId = -1
-        var bestScore = Float.NEGATIVE_INFINITY
-        for (id in allowed) {
-            if (id < logits.size && logits[id] > bestScore) {
-                bestScore = logits[id]
-                bestId = id
-            }
+    /** Переход автомата по выбранному токену. */
+    fun step(id: Int) {
+        val tok = tokenOfId(id) ?: run {
+            Log.w(TAG, "step: неизвестный id=$id, форсируем DONE")
+            state = S.DONE
+            return
         }
-        // Если ничего не разрешено — возвращаем EOS, чтобы не зависнуть
-        return if (bestId >= 0) bestId else eosId
-    }
-
-    /**
-     * Переход автомата.
-     */
-    private fun nextState(state: State, tokenId: Int): State {
-        val tokenStr = tokenizer.tokenOf(tokenId.toLong()) ?: return state
-
-        return when (state) {
-            State.INTENT -> when {
-                tokenStr == TOKEN_INTENT_UNSUPPORTED -> State.END_FRAME
-                tokenStr == TOKEN_INTENT_CANCEL -> State.SYMPTOMS
-                tokenStr == TOKEN_INTENT_BOOK ||
-                        tokenStr == TOKEN_INTENT_RESCHEDULE -> State.SPECIALTY
-                else -> State.END_FRAME
+        Log.d(TAG, "step: state=$state, token=$tok")
+        state = when (state) {
+            S.INTENT -> when (tok) {
+                "<UNSUPPORTED>" -> S.END_FRAME
+                "<CANCEL>" -> S.SYMPTOMS
+                "<BOOK>", "<RESCHEDULE>" -> S.SPECIALTY
+                else -> S.END_FRAME
             }
 
-            State.SPECIALTY -> State.TIME
+            S.SPECIALTY -> S.TIME
 
-            State.TIME -> when (tokenStr) {
-                TOKEN_TIME_OPEN -> State.TIME  // внутри слота
-                TOKEN_TIME_CLOSE -> State.SYMPTOMS  // закрыли слот
-                else -> State.TIME  // остаёмся в TIME для следующего фактора
+            S.TIME -> if (tok == "<T_UNKNOWN>") S.SYMPTOMS else S.FACTORS
+
+            S.FACTORS -> when (tok) {
+                "</TIME>" -> S.SYMPTOMS
+                else -> {
+                    lastRank = rank(tok)
+                    emitted++
+                    S.FACTORS
+                }
             }
 
-            State.SYMPTOMS -> when (tokenStr) {
-                TOKEN_END_FRAME -> State.END_FRAME
-                "<NEEDS_CLARIFICATION>" -> State.CLARIFICATION
-                else -> State.SYMPTOMS
+            S.SYMPTOMS -> when {
+                tok in symptoms -> S.SYMPTOMS
+                tok == "<NEEDS_CLARIFICATION>" -> S.CLARIF
+                tok == "<END_FRAME>" -> S.END_FRAME
+                tok.startsWith("<SYMPTOM_") -> {
+                    symptoms += tok
+                    S.SYMPTOMS
+                }
+                else -> S.SYMPTOMS
             }
 
-            State.CLARIFICATION -> State.END_FRAME
-
-            State.END_FRAME -> State.DONE
-            State.DONE -> State.DONE
+            S.CLARIF -> if (tok == "<END_FRAME>") S.END_FRAME else S.CLARIF
+            S.END_FRAME -> if (tok == "<EOS>") S.DONE else S.END_FRAME
+            S.DONE -> S.DONE
         }
     }
+
+    val isDone: Boolean get() = state == S.DONE
+
+    /** Обратный маппинг id → token. Заполняется при первом вызове. */
+    private val idToToken: Map<Int, String> by lazy {
+        val m = HashMap<Int, String>()
+        (FrameVocab.INTENTS + FrameVocab.SPECIALTY + FrameVocab.SYMPTOMS +
+                FrameVocab.TIME_SCOPE + FrameVocab.TIME_DAY + FrameVocab.TIME_OF_DAY +
+                FrameVocab.SERVICE).forEach { t ->
+            idOf(t)?.let { m[it] = t }
+        }
+        m
+    }
+
+    private fun tokenOfId(id: Int): String? = idToToken[id]
 }
