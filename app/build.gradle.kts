@@ -100,4 +100,17 @@ dependencies {
 
     // JSON-парсер для tokenizer.json
     implementation(libs.kotlinx.serialization.json)
+
+    // Retrofit + OkHttp для сетевых запросов
+    implementation(libs.retrofit)
+    implementation(libs.retrofit.gson)
+    implementation(libs.okhttp)
+    implementation(libs.okhttp.logging)
+    implementation(libs.gson)
+
+    // EncryptedSharedPreferences для безопасного хранения токена
+    implementation(libs.androidx.security.crypto)
+
+    // Navigation Compose для экранов логина и календаря
+    implementation(libs.androidx.navigation.compose)
 }

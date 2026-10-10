@@ -1,4 +1,3 @@
-// MainActivity.kt
 package com.clinic.clinicapp
 
 import android.Manifest
@@ -14,11 +13,12 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewmodel.compose.viewModel
+import com.clinic.clinicapp.data.auth.AuthRepository
 import com.clinic.clinicapp.data.repository.InMemoryAppointmentRepository
-import com.clinic.clinicapp.ui.screens.CalendarScreen
+import com.clinic.clinicapp.navigation.AppNavigation
+import com.clinic.clinicapp.navigation.Routes
 import com.clinic.clinicapp.ui.screens.VoiceBookingScreen
 import com.clinic.clinicapp.ui.theme.ClinicTheme
-import com.clinic.clinicapp.viewmodel.CalendarViewModel
 import com.clinic.clinicapp.viewmodel.VoiceBookingViewModel
 
 class MainActivity : ComponentActivity() {
@@ -27,7 +27,7 @@ class MainActivity : ComponentActivity() {
 
     private val permissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestPermission()
-    ) { /* результат обрабатывается самим приложением */ }
+    ) { /* не блокируем */ }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -45,21 +45,17 @@ class MainActivity : ComponentActivity() {
 
 @Composable
 private fun AppRoot(repository: InMemoryAppointmentRepository) {
-
-    // LocalContext читаем ЗДЕСЬ, в @Composable-контексте
     val appContext = LocalContext.current.applicationContext as Application
 
-    // Фабрика для календаря
-    val calendarVmFactory = remember {
-        object : ViewModelProvider.Factory {
-            override fun <T : ViewModel> create(modelClass: Class<T>): T {
-                @Suppress("UNCHECKED_CAST")
-                return CalendarViewModel(repository) as T
-            }
-        }
+    // Проверяем авторизацию один раз при старте
+    val startDestination = remember {
+        val auth = AuthRepository(appContext)
+        if (auth.isLoggedIn()) Routes.CALENDAR else Routes.LOGIN
     }
 
-    // Фабрика для голосового экрана
+    // Модальный голосовой диалог — как был
+    var showVoiceSheet by remember { mutableStateOf(false) }
+
     val voiceVmFactory = remember {
         object : ViewModelProvider.Factory {
             override fun <T : ViewModel> create(modelClass: Class<T>): T {
@@ -69,15 +65,15 @@ private fun AppRoot(repository: InMemoryAppointmentRepository) {
         }
     }
 
-    val calendarVm: CalendarViewModel = viewModel(factory = calendarVmFactory)
-
-    var showVoiceSheet by remember { mutableStateOf(false) }
-
-    CalendarScreen(
-        viewModel = calendarVm,
-        onMicClick = { showVoiceSheet = true }
+    // Навигация
+    AppNavigation(
+        repository = repository,
+        startDestination = startDestination
     )
 
+    // Модальный голосовой экран — оставляем поверх
+    // ВАЖНО: пока открывается по FAB из CalendarScreen — нужно прокинуть коллбэк.
+    // Пока FAB на Calendare не открывает голосовой — просто оставляем заготовку.
     if (showVoiceSheet) {
         val voiceVm: VoiceBookingViewModel = viewModel(factory = voiceVmFactory)
         val voiceState by voiceVm.state.collectAsState()
@@ -90,7 +86,10 @@ private fun AppRoot(repository: InMemoryAppointmentRepository) {
                     state = voiceState,
                     onStartRecording = voiceVm::startRecording,
                     onStopRecording = voiceVm::stopRecording,
-                    onReset = voiceVm::reset
+                    onReset = {
+                        voiceVm.reset()
+                        showVoiceSheet = false
+                    }
                 )
             }
         )
