@@ -37,8 +37,14 @@ class AuthRepository(context: Context) {
                 if (response.isSuccessful) {
                     val body = response.body()
                     if (body != null) {
-                        storage.saveSession(body.token, body.login, body.role)
-                        Log.d(TAG, "Login OK: ${body.login}, role=${body.role}")
+                        storage.saveSession(
+                            token = body.token,
+                            login = body.login,
+                            role = body.role,
+                            firstName = body.firstName,
+                            lastName = body.lastName
+                        )
+                        Log.d(TAG, "Session saved: token.length=${body.token?.length}, login=${body.login}")
                         AuthResult.Success(body)
                     } else {
                         AuthResult.Error("Пустой ответ сервера")
@@ -53,27 +59,44 @@ class AuthRepository(context: Context) {
         }
 
     /** Зарегистрироваться. Роль фиксирована — PATIENT. */
-    suspend fun register(login: String, password: String): AuthResult =
-        withContext(Dispatchers.IO) {
-            try {
-                val response = api.register(RegisterRequest(login, password, ROLE_PATIENT))
-                if (response.isSuccessful) {
-                    val body = response.body()
-                    if (body != null) {
-                        storage.saveSession(body.token, body.login, body.role)
-                        Log.d(TAG, "Register OK: ${body.login}, role=${body.role}")
-                        AuthResult.Success(body)
-                    } else {
-                        AuthResult.Error("Пустой ответ сервера")
-                    }
-                } else {
-                    AuthResult.Error(parseError(response.code(), response.errorBody()?.string()))
-                }
-            } catch (t: Throwable) {
-                Log.e(TAG, "Register failed", t)
-                AuthResult.Error(networkErrorMessage(t))
+    suspend fun register(
+        login: String,
+        password: String,
+        firstName: String,
+        lastName: String
+    ): AuthResult = withContext(Dispatchers.IO) {
+        try {
+            val response = api.register(
+                RegisterRequest(
+                    login = login,
+                    password = password,
+                    firstName = firstName,
+                    lastName = lastName,
+                    role = ROLE_PATIENT
+                )
+            )
+            if (response.isSuccessful) {
+                val body = response.body()
+                val actualLogin = body?.login ?: login
+                val actualRole = body?.role ?: ROLE_PATIENT
+                Log.d(TAG, "Register OK: $actualLogin, role=$actualRole")
+                AuthResult.Success(
+                    AuthResponse(
+                        token = body?.token,
+                        login = actualLogin,
+                        role = actualRole,
+                        firstName = body?.firstName,
+                        lastName = body?.lastName
+                    )
+                )
+            } else {
+                AuthResult.Error(parseError(response.code(), response.errorBody()?.string()))
             }
+        } catch (t: Throwable) {
+            Log.e(TAG, "Register failed", t)
+            AuthResult.Error(networkErrorMessage(t))
         }
+    }
 
     /** Выход из аккаунта. */
     fun logout() {

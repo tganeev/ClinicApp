@@ -19,6 +19,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ExitToApp
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.ChevronLeft
 import androidx.compose.material.icons.filled.ChevronRight
@@ -81,6 +82,8 @@ private val ColorBlue = Color(0xFF2196F3)
 @Composable
 fun CalendarScreen(
     viewModel: CalendarViewModel,
+    userName: String,
+    onLogout: () -> Unit,
     onMicClick: () -> Unit
 ) {
     val selectedDate by viewModel.selectedDate.collectAsState()
@@ -104,10 +107,46 @@ fun CalendarScreen(
         Scaffold(
             topBar = {
                 TopAppBar(
-                    title = { Text("Мои записи") },
+                    // Слева — колонка с логином и заголовком
+                    navigationIcon = {
+                        Column(
+                            modifier = Modifier.padding(start = 16.dp),
+                            verticalArrangement = Arrangement.Center
+                        ) {
+                            // Логин пользователя — мелким шрифтом
+                            Text(
+                                text = userName,
+                                fontSize = 16.sp,
+                                fontWeight = FontWeight.Medium,
+                                color = MaterialTheme.colorScheme.onPrimaryContainer
+                            )
+                            // «Мои записи» — под логином
+                            Text(
+                                text = "Мои записи",
+                                style = MaterialTheme.typography.titleMedium,
+                                color = MaterialTheme.colorScheme.onPrimaryContainer
+                            )
+                        }
+                    },
+
+                    // Заголовок не нужен — он уже в navigationIcon
+                    title = { },
+
+                    // Справа — кнопка выхода
+                    actions = {
+                        IconButton(onClick = onLogout) {
+                            Icon(
+                                imageVector = Icons.AutoMirrored.Filled.ExitToApp,
+                                contentDescription = "Выйти",
+                                tint = MaterialTheme.colorScheme.onPrimaryContainer
+                            )
+                        }
+                    },
+
                     colors = TopAppBarDefaults.topAppBarColors(
                         containerColor = MaterialTheme.colorScheme.primaryContainer,
-                        titleContentColor = MaterialTheme.colorScheme.onPrimaryContainer
+                        navigationIconContentColor = MaterialTheme.colorScheme.onPrimaryContainer,
+                        actionIconContentColor = MaterialTheme.colorScheme.onPrimaryContainer
                     )
                 )
             }
@@ -183,7 +222,7 @@ fun CalendarScreen(
             verticalAlignment = Alignment.CenterVertically
         ) {
             FloatingActionButton(
-                onClick = { showAddSlotDialog = true },
+                onClick = onMicClick,
                 containerColor = MaterialTheme.colorScheme.secondary
             ) {
                 Icon(

@@ -1,51 +1,54 @@
-// viewmodel/CalendarViewModel.kt
 package com.clinic.clinicapp.viewmodel
 
-import android.util.Log
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
-import com.clinic.clinicapp.data.model.Appointment
 import com.clinic.clinicapp.data.model.DayItem
-import com.clinic.clinicapp.data.model.Doctor
 import com.clinic.clinicapp.data.repository.AppointmentRepository
+import com.clinic.clinicapp.data.schedule.NetworkAppointmentRepository
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.stateIn
-import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.launch
 import java.time.LocalDate
 import java.time.YearMonth
 import java.time.format.DateTimeFormatter
 
-/**
- * ViewModel главного экрана — календаря.
- * Показывает записи и свободные слоты по дням.
- */
 class CalendarViewModel(
     private val repository: AppointmentRepository
 ) : ViewModel() {
 
     private val dateFormatter = DateTimeFormatter.ofPattern("yyyy-MM-dd")
 
-    // Текущая выбранная дата (по умолчанию — сегодня)
     private val _selectedDate = MutableStateFlow(LocalDate.now())
     val selectedDate: StateFlow<LocalDate> = _selectedDate
 
-    // Текущий отображаемый месяц (может не совпадать с выбранной датой)
     private val _displayedMonth = MutableStateFlow(YearMonth.now())
     val displayedMonth: StateFlow<YearMonth> = _displayedMonth
-    val doctors: StateFlow<List<Doctor>> = repository.doctors
 
-    /**
-     * Карта статусов дней: какие даты имеют записи и/или свободные слоты.
-     * Используется для отрисовки точек под днями в WeekStrip.
-     */
+    private val _isLoading = MutableStateFlow(false)
+    val isLoading: StateFlow<Boolean> = _isLoading
+
+    init {
+        // Загружаем врачей и слоты при первом создании
+        viewModelScope.launch {
+            _isLoading.value = true
+            if (repository is NetworkAppointmentRepository) {
+                repository.loadDoctors()
+                repository.loadAllSlots(days = 30)
+            }
+            _isLoading.value = false
+        }
+    }
+
+    val doctors: StateFlow<List<com.clinic.clinicapp.data.model.Doctor>> =
+        repository.doctors
+
     val dayStatuses: StateFlow<Map<LocalDate, DayStatus>> =
         combine(repository.doctors, repository.appointments, _displayedMonth) { doctors, appointments, month ->
             val statuses = mutableMapOf<LocalDate, DayStatus>()
 
-            // Считаем записи по датам
             appointments.forEach { appt ->
                 val date = runCatching { LocalDate.parse(appt.date) }.getOrNull() ?: return@forEach
                 if (YearMonth.from(date) == month) {
@@ -54,7 +57,6 @@ class CalendarViewModel(
                 }
             }
 
-            // Считаем свободные слоты по датам
             doctors.forEach { doctor ->
                 doctor.availableSlots
                     .filter { it.isAvailable }
@@ -70,26 +72,19 @@ class CalendarViewModel(
             statuses
         }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyMap())
 
-    /**
-     * Список элементов на выбранную дату (записи + свободные слоты).
-     */
     val dayItems: StateFlow<List<DayItem>> =
         combine(repository.doctors, repository.appointments, _selectedDate) { doctors, appointments, date ->
             val dateStr = date.format(dateFormatter)
             val result = mutableListOf<DayItem>()
 
-            // Сначала записи (отсортированы по времени)
             appointments
                 .filter { it.date == dateStr }
                 .sortedBy { it.time }
                 .forEach { appt ->
                     val doctor = doctors.find { it.id == appt.doctorId }
-                    if (doctor != null) {
-                        result += DayItem.Booked(appt, doctor)
-                    }
+                    if (doctor != null) result += DayItem.Booked(appt, doctor)
                 }
 
-            // Потом свободные слоты (тоже по времени)
             doctors.flatMap { d ->
                 d.availableSlots
                     .filter { it.date == dateStr && it.isAvailable }
@@ -103,45 +98,25 @@ class CalendarViewModel(
             result
         }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
-    /** Переключиться на другую дату. */
     fun selectDate(date: LocalDate) {
         _selectedDate.value = date
         _displayedMonth.value = YearMonth.from(date)
     }
 
+    fun previousMonth() { _displayedMonth.value = _displayedMonth.value.minusMonths(1) }
+    fun nextMonth() { _displayedMonth.value = _displayedMonth.value.plusMonths(1) }
 
-
-    /** Перейти на предыдущий месяц. */
-    fun previousMonth() {
-        _displayedMonth.value = _displayedMonth.value.minusMonths(1)
-    }
-
-    /** Перейти на следующий месяц. */
-    fun nextMonth() {
-        _displayedMonth.value = _displayedMonth.value.plusMonths(1)
-    }
-
-    /**
-     * Добавляет новый слот в расписание.
-     */
-    fun addSlot(doctorId: String, date: String, time: String) {
-        viewModelScope.launch {
-            val ok = repository.addSlot(doctorId, date, time)
-            Log.d("CalendarViewModel", "addSlot: $ok для $doctorId $date $time")
-        }
-    }
-
-    /** Записаться на свободный слот (пользователь нажал на элемент Free). */
     fun bookSlot(doctorId: String, slotId: String) {
         viewModelScope.launch {
             repository.book(doctorId, slotId)
         }
     }
+
+    fun addSlot(doctorId: String, date: String, time: String) {
+        // Пока не реализовано — нужен эндпоинт POST /api/slots
+    }
 }
 
-/**
- * Статус дня для отображения в календаре.
- */
 data class DayStatus(
     val hasAppointment: Boolean = false,
     val hasFreeSlot: Boolean = false

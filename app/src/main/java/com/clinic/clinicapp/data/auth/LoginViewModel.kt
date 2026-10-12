@@ -22,7 +22,6 @@ import kotlinx.coroutines.launch
 class LoginViewModel(app: Application) : AndroidViewModel(app) {
 
     private val TAG = "LoginViewModel"
-
     private val repository = AuthRepository(app)
 
     private val _state = MutableStateFlow<AuthUiState>(AuthUiState.Idle)
@@ -31,57 +30,65 @@ class LoginViewModel(app: Application) : AndroidViewModel(app) {
     private val _tab = MutableStateFlow(AuthTab.LOGIN)
     val tab: StateFlow<AuthTab> = _tab
 
-    /** Проверить, авторизован ли пользователь (для навигации при старте). */
     fun isLoggedIn(): Boolean = repository.isLoggedIn()
 
-    /** Переключить вкладку «Вход» / «Регистрация». */
     fun setTab(tab: AuthTab) {
         _tab.value = tab
-        // Сбрасываем ошибки при переключении
-        if (_state.value is AuthUiState.Error) {
-            _state.value = AuthUiState.Idle
-        }
+        // Сбрасываем все состояния при переключении вкладок
+        _state.value = AuthUiState.Idle
     }
 
-    /** Выполнить вход или регистрацию в зависимости от активной вкладки. */
-    fun submit(login: String, password: String) {
+    fun submitLogin(login: String, password: String) {
         if (_state.value is AuthUiState.Loading) return
-
-        // Простая валидация
         if (login.isBlank() || password.isBlank()) {
             _state.value = AuthUiState.Error("Заполните логин и пароль")
             return
         }
-
         viewModelScope.launch {
             _state.value = AuthUiState.Loading
-
-            val result = when (_tab.value) {
-                AuthTab.LOGIN -> repository.login(login.trim(), password)
-                AuthTab.REGISTER -> repository.register(login.trim(), password)
-            }
-
+            val result = repository.login(login.trim(), password)
             _state.value = when (result) {
-                is AuthResult.Success -> {
-                    Log.d(TAG, "Auth success: ${result.auth.login}, role=${result.auth.role}")
-                    AuthUiState.Success(result.auth.login, result.auth.role)
-                }
-                is AuthResult.Error -> {
-                    Log.w(TAG, "Auth error: ${result.message}")
-                    AuthUiState.Error(result.message)
-                }
+                is AuthResult.Success -> AuthUiState.Success(result.auth.login, result.auth.role)
+                is AuthResult.Error -> AuthUiState.Error(result.message)
             }
         }
     }
 
-    /** Сбросить состояние (например, после ошибки). */
+    fun submitRegister(
+        login: String,
+        password: String,
+        firstName: String,
+        lastName: String
+    ) {
+        if (_state.value is AuthUiState.Loading) return
+        when {
+            login.isBlank() || password.isBlank() ->
+            { _state.value = AuthUiState.Error("Заполните логин и пароль"); return }
+            firstName.isBlank() ->
+            { _state.value = AuthUiState.Error("Заполните имя"); return }
+            lastName.isBlank() ->
+            { _state.value = AuthUiState.Error("Заполните фамилию"); return }
+        }
+        viewModelScope.launch {
+            _state.value = AuthUiState.Loading
+            val result = repository.register(login.trim(), password, firstName.trim(), lastName.trim())
+            when (result) {
+                is AuthResult.Success -> {
+                    _state.value = AuthUiState.Registered(result.auth.login)
+                    _tab.value = AuthTab.LOGIN
+                }
+                is AuthResult.Error -> _state.value = AuthUiState.Error(result.message)
+            }
+        }
+    }
+
     fun resetState() {
         _state.value = AuthUiState.Idle
     }
 
-    /** Выход. */
     fun logout() {
         repository.logout()
         _state.value = AuthUiState.Idle
+        _tab.value = AuthTab.LOGIN
     }
 }

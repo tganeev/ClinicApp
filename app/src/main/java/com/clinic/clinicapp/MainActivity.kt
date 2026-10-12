@@ -14,7 +14,8 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.clinic.clinicapp.data.auth.AuthRepository
-import com.clinic.clinicapp.data.repository.InMemoryAppointmentRepository
+import com.clinic.clinicapp.data.auth.NetworkClient
+import com.clinic.clinicapp.data.schedule.NetworkAppointmentRepository
 import com.clinic.clinicapp.navigation.AppNavigation
 import com.clinic.clinicapp.navigation.Routes
 import com.clinic.clinicapp.ui.screens.VoiceBookingScreen
@@ -23,7 +24,10 @@ import com.clinic.clinicapp.viewmodel.VoiceBookingViewModel
 
 class MainActivity : ComponentActivity() {
 
-    private val repository = InMemoryAppointmentRepository()
+    /** Создаётся при первом обращении — после NetworkClient.init(). */
+    private val repository: NetworkAppointmentRepository by lazy {
+        NetworkAppointmentRepository()
+    }
 
     private val permissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestPermission()
@@ -31,6 +35,9 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+
+        NetworkClient.init(applicationContext)
+
         permissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
 
         setContent {
@@ -44,16 +51,16 @@ class MainActivity : ComponentActivity() {
 }
 
 @Composable
-private fun AppRoot(repository: InMemoryAppointmentRepository) {
+private fun AppRoot(repository: NetworkAppointmentRepository) {   // ← тип изменён
     val appContext = LocalContext.current.applicationContext as Application
 
-    // Проверяем авторизацию один раз при старте
+    // Определяем стартовый экран
     val startDestination = remember {
         val auth = AuthRepository(appContext)
         if (auth.isLoggedIn()) Routes.CALENDAR else Routes.LOGIN
     }
 
-    // Модальный голосовой диалог — как был
+    // Модальный голосовой диалог
     var showVoiceSheet by remember { mutableStateOf(false) }
 
     val voiceVmFactory = remember {
@@ -68,12 +75,11 @@ private fun AppRoot(repository: InMemoryAppointmentRepository) {
     // Навигация
     AppNavigation(
         repository = repository,
-        startDestination = startDestination
+        startDestination = startDestination,
+        onMicClick = { showVoiceSheet = true }
     )
 
-    // Модальный голосовой экран — оставляем поверх
-    // ВАЖНО: пока открывается по FAB из CalendarScreen — нужно прокинуть коллбэк.
-    // Пока FAB на Calendare не открывает голосовой — просто оставляем заготовку.
+    // Голосовой диалог
     if (showVoiceSheet) {
         val voiceVm: VoiceBookingViewModel = viewModel(factory = voiceVmFactory)
         val voiceState by voiceVm.state.collectAsState()

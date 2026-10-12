@@ -12,7 +12,7 @@ interface AuthApi {
     @POST("api/auth/login")
     suspend fun login(@Body request: LoginRequest): Response<AuthResponse>
 
-    // ВНИМАНИЕ: на бэкенде именно "regiester" (с опечаткой).
-    @POST("api/auth/regiester")
+    // Правильный путь — /register (без опечатки)
+    @POST("api/auth/register")
     suspend fun register(@Body request: RegisterRequest): Response<AuthResponse>
 }
