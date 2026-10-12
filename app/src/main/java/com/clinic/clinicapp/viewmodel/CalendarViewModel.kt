@@ -1,5 +1,6 @@
 package com.clinic.clinicapp.viewmodel
 
+import android.util.Log
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.clinic.clinicapp.data.model.DayItem
@@ -31,14 +32,19 @@ class CalendarViewModel(
     val isLoading: StateFlow<Boolean> = _isLoading
 
     init {
-        // Загружаем врачей и слоты при первом создании
         viewModelScope.launch {
             _isLoading.value = true
-            if (repository is NetworkAppointmentRepository) {
-                repository.loadDoctors()
-                repository.loadAllSlots(days = 30)
+            try {
+                val netRepo = repository as? NetworkAppointmentRepository
+                if (netRepo != null) {
+                    Log.d("CalendarViewModel", "Загрузка врачей и записей…")
+                    netRepo.loadDoctors()
+                    netRepo.loadAppointments()      // ← добавили
+                    netRepo.loadAllSlots(days = 30)
+                }
+            } finally {
+                _isLoading.value = false
             }
-            _isLoading.value = false
         }
     }
 
@@ -108,13 +114,20 @@ class CalendarViewModel(
 
     fun bookSlot(doctorId: String, slotId: String) {
         viewModelScope.launch {
-            repository.book(doctorId, slotId)
+            val netRepo = repository as? NetworkAppointmentRepository ?: return@launch
+            val doctor = netRepo.doctors.value.find { it.id == doctorId } ?: return@launch
+            val slot = doctor.availableSlots.find { it.id == slotId } ?: return@launch
+
+            val ok = netRepo.createAppointment(
+                doctorId = doctorId,
+                date = slot.date,
+                time = slot.time
+            )
+            Log.d("CalendarViewModel", "bookSlot: $ok для ${doctor.name} ${slot.date} ${slot.time}")
         }
     }
 
-    fun addSlot(doctorId: String, date: String, time: String) {
-        // Пока не реализовано — нужен эндпоинт POST /api/slots
-    }
+
 }
 
 data class DayStatus(

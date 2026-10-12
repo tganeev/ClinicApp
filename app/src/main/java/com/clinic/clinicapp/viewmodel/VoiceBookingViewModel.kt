@@ -7,6 +7,7 @@ import androidx.lifecycle.viewModelScope
 import com.clinic.clinicapp.data.nlu.ClinicNLU
 import com.clinic.clinicapp.data.nlu.FrameParser
 import com.clinic.clinicapp.data.repository.AppointmentRepository
+import com.clinic.clinicapp.data.schedule.NetworkAppointmentRepository
 import com.clinic.clinicapp.data.voice.AudioRecorder
 import com.clinic.clinicapp.data.voice.SherpaSttEngine
 import com.clinic.clinicapp.data.voice.SpeechSynthesizer
@@ -334,37 +335,43 @@ class VoiceBookingViewModel(
 
         when (cmd.type) {
             CommandType.CANCEL_ALL, CommandType.CANCEL_ONE -> {
-                val count = repository.cancelAllAppointments()
-                Log.d(TAG, "cancelled $count appointments")
-                viewModelScope.launch { tts.speak("Все записи отменены") }
-                _state.value = VoiceUiState.Cancelled(count)
+                viewModelScope.launch {
+                    val count = (repository as? NetworkAppointmentRepository)
+                        ?.cancelAllAppointmentsSuspend() ?: 0
+                    Log.d(TAG, "cancelled $count appointments")
+                    tts.speak("Все записи отменены")
+                    _state.value = VoiceUiState.Cancelled(count)
+                }
             }
 
             CommandType.BOOK_NEAREST -> {
                 val nearest = if (cmd.doctor != null) {
-                    Log.d(TAG, "Ищем ближайший слот у врача: ${cmd.doctor.name}")
                     repository.findNearestFreeSlotForDoctor(cmd.doctor.id)
                 } else {
-                    Log.d(TAG, "Ищем ближайший слот у любого врача")
                     repository.findNearestFreeSlot()
                 }
 
                 if (nearest == null) {
                     _state.value = VoiceUiState.Error(
-                        if (cmd.doctor != null)
-                            "Нет свободных слотов у ${cmd.doctor.name}"
-                        else "Нет свободных слотов"
+                        if (cmd.doctor != null) "Нет свободных слотов у ${cmd.doctor.name}" else "Нет свободных слотов"
                     )
                     return
                 }
 
                 val (doctor, slot) = nearest
-                val ok = repository.book(doctor.id, slot.id)
-                _state.value = if (ok) {
-                    viewModelScope.launch { tts.speak("Запись оформлена") }
-                    VoiceUiState.Booked(doctor.name, slot.date, slot.time)
-                } else {
-                    VoiceUiState.Error("Не удалось записаться")
+                viewModelScope.launch {
+                    val ok = (repository as? NetworkAppointmentRepository)?.createAppointment(
+                        doctorId = doctor.id,
+                        date = slot.date,
+                        time = slot.time
+                    ) ?: false
+
+                    _state.value = if (ok) {
+                        tts.speak("Запись оформлена")
+                        VoiceUiState.Booked(doctor.name, slot.date, slot.time)
+                    } else {
+                        VoiceUiState.Error("Не удалось записаться")
+                    }
                 }
             }
 
@@ -378,39 +385,31 @@ class VoiceBookingViewModel(
                     return
                 }
 
-                // Если дата/время не указаны — ищем ближайший слот у этого врача
-                if (date == null || time == null) {
-                    Log.d(TAG, "Дата/время не указаны, используем ближайший слот у ${doctor.name}")
+                // Нет даты/времени — берём ближайшее
+                val (actualDate, actualTime) = if (date == null || time == null) {
                     val nearest = repository.findNearestFreeSlotForDoctor(doctor.id)
-                    if (nearest == null) {
-                        _state.value = VoiceUiState.Error("Нет свободных слотов у ${doctor.name}")
-                        return
-                    }
-                    val (foundDoctor, slot) = nearest
-                    val ok = repository.book(foundDoctor.id, slot.id)
+                        ?: run {
+                            _state.value = VoiceUiState.Error("Нет свободных слотов у ${doctor.name}")
+                            return
+                        }
+                    nearest.second.date to nearest.second.time
+                } else {
+                    date to time
+                }
+
+                viewModelScope.launch {
+                    val ok = (repository as? NetworkAppointmentRepository)?.createAppointment(
+                        doctorId = doctor.id,
+                        date = actualDate,
+                        time = actualTime
+                    ) ?: false
+
                     _state.value = if (ok) {
-                        viewModelScope.launch { tts.speak("Запись оформлена") }
-                        VoiceUiState.Booked(foundDoctor.name, slot.date, slot.time)
+                        tts.speak("Запись оформлена")
+                        VoiceUiState.Booked(doctor.name, actualDate, actualTime)
                     } else {
                         VoiceUiState.Error("Не удалось записаться")
                     }
-                    return
-                }
-
-                // Обычный путь — есть и дата, и время
-                val slot = doctor.availableSlots.find {
-                    it.date == date && it.time == time && it.isAvailable
-                }
-                if (slot == null) {
-                    _state.value = VoiceUiState.Error("Слот $date $time недоступен")
-                    return
-                }
-                val ok = repository.book(doctor.id, slot.id)
-                _state.value = if (ok) {
-                    viewModelScope.launch { tts.speak("Запись оформлена") }
-                    VoiceUiState.Booked(doctor.name, date, time)
-                } else {
-                    VoiceUiState.Error("Не удалось создать запись")
                 }
             }
 

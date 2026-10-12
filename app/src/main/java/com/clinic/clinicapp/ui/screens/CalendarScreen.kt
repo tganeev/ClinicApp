@@ -20,29 +20,20 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ExitToApp
-import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.ChevronLeft
 import androidx.compose.material.icons.filled.ChevronRight
 import androidx.compose.material.icons.filled.EventAvailable
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.Schedule
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
-import androidx.compose.material3.Divider
-import androidx.compose.material3.DropdownMenu
-import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
-import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
-import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -60,7 +51,6 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.clinic.clinicapp.data.model.DayItem
-import com.clinic.clinicapp.data.model.Doctor
 import com.clinic.clinicapp.viewmodel.CalendarViewModel
 import com.clinic.clinicapp.viewmodel.DayStatus
 import java.time.DayOfWeek
@@ -75,8 +65,9 @@ private val ColorBlue = Color(0xFF2196F3)
 /**
  * Главный экран приложения — календарь записей.
  *
- * @param onMicClick вызывается при нажатии на кнопку микрофона —
- *        открывает голосовой экран (модально).
+ * @param userName  имя пользователя (отображается в шапке)
+ * @param onLogout  выход из аккаунта
+ * @param onMicClick открывает голосовой диалог
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -90,10 +81,8 @@ fun CalendarScreen(
     val displayedMonth by viewModel.displayedMonth.collectAsState()
     val dayStatuses by viewModel.dayStatuses.collectAsState()
     val dayItems by viewModel.dayItems.collectAsState()
-    val doctors by viewModel.doctors.collectAsState()
 
     var weekStart by remember { mutableStateOf(selectedDate.with(DayOfWeek.MONDAY)) }
-    var showAddSlotDialog by remember { mutableStateOf(false) }
 
     LaunchedEffect(selectedDate) {
         if (selectedDate < weekStart || selectedDate > weekStart.plusDays(6)) {
@@ -106,33 +95,17 @@ fun CalendarScreen(
         // ---- Основной контент ----
         Scaffold(
             topBar = {
-                TopAppBar(
-                    // Слева — колонка с логином и заголовком
+                androidx.compose.material3.TopAppBar(
                     navigationIcon = {
-                        Column(
-                            modifier = Modifier.padding(start = 16.dp),
-                            verticalArrangement = Arrangement.Center
-                        ) {
-                            // Логин пользователя — мелким шрифтом
-                            Text(
-                                text = userName,
-                                fontSize = 16.sp,
-                                fontWeight = FontWeight.Medium,
-                                color = MaterialTheme.colorScheme.onPrimaryContainer
-                            )
-                            // «Мои записи» — под логином
-                            Text(
-                                text = "Мои записи",
-                                style = MaterialTheme.typography.titleMedium,
-                                color = MaterialTheme.colorScheme.onPrimaryContainer
-                            )
-                        }
+                        Text(
+                            text = userName,
+                            style = MaterialTheme.typography.titleMedium,
+                            fontWeight = FontWeight.Medium,
+                            color = MaterialTheme.colorScheme.onPrimaryContainer,
+                            modifier = Modifier.padding(start = 16.dp)
+                        )
                     },
-
-                    // Заголовок не нужен — он уже в navigationIcon
                     title = { },
-
-                    // Справа — кнопка выхода
                     actions = {
                         IconButton(onClick = onLogout) {
                             Icon(
@@ -142,7 +115,6 @@ fun CalendarScreen(
                             )
                         }
                     },
-
                     colors = TopAppBarDefaults.topAppBarColors(
                         containerColor = MaterialTheme.colorScheme.primaryContainer,
                         navigationIconContentColor = MaterialTheme.colorScheme.onPrimaryContainer,
@@ -150,14 +122,20 @@ fun CalendarScreen(
                     )
                 )
             }
-            // floatingActionButton НЕ передаём — кнопки разместим отдельно ниже,
-            // чтобы обе были на одной высоте и с симметричными отступами.
         ) { padding ->
             Column(
                 modifier = Modifier
                     .padding(padding)
                     .fillMaxSize()
             ) {
+                // Заголовок «Мои записи» — под шапкой
+                Text(
+                    text = "Мои записи",
+                    style = MaterialTheme.typography.titleLarge,
+                    fontWeight = FontWeight.Bold,
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
+                )
+
                 MonthSelector(
                     month = displayedMonth,
                     onPrev = { viewModel.previousMonth() },
@@ -171,7 +149,7 @@ fun CalendarScreen(
                     onDateClick = { viewModel.selectDate(it) }
                 )
 
-                Divider(modifier = Modifier.padding(vertical = 8.dp))
+                androidx.compose.material3.Divider(modifier = Modifier.padding(vertical = 8.dp))
 
                 if (dayItems.isEmpty()) {
                     Box(
@@ -179,9 +157,8 @@ fun CalendarScreen(
                         contentAlignment = Alignment.Center
                     ) {
                         Text(
-                            text = "На этот день ничего нет.\n" +
-                                    "Нажмите на микрофон, чтобы записаться голосом,\n" +
-                                    "или на «+», чтобы добавить свободный слот.",
+                            text = "На этот день записей нет.\n" +
+                                    "Нажмите на микрофон, чтобы записаться голосом.",
                             fontSize = 16.sp,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                             textAlign = TextAlign.Center
@@ -209,52 +186,21 @@ fun CalendarScreen(
             }
         }
 
-        // ---- Две кнопки внизу экрана: «+» слева, микрофон справа ----
-        // safeDrawingPadding() учитывает statusBars, navigationBars, displayCutout,
-        // поэтому кнопки не уходят за пределы видимой области.
-        Row(
+        // ---- Кнопка микрофона (правая нижняя) ----
+        FloatingActionButton(
+            onClick = onMicClick,
+            containerColor = MaterialTheme.colorScheme.primary,
             modifier = Modifier
-                .align(Alignment.BottomCenter)
-                .fillMaxWidth()
+                .align(Alignment.BottomEnd)
                 .safeDrawingPadding()
-                .padding(horizontal = 16.dp, vertical = 16.dp),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically
+                .padding(16.dp)
         ) {
-            FloatingActionButton(
-                onClick = onMicClick,
-                containerColor = MaterialTheme.colorScheme.secondary
-            ) {
-                Icon(
-                    imageVector = Icons.Filled.Add,
-                    contentDescription = "Добавить слот",
-                    modifier = Modifier.size(28.dp)
-                )
-            }
-
-            FloatingActionButton(
-                onClick = onMicClick,
-                containerColor = MaterialTheme.colorScheme.primary
-            ) {
-                Icon(
-                    imageVector = Icons.Filled.Mic,
-                    contentDescription = "Записаться голосом",
-                    modifier = Modifier.size(28.dp)
-                )
-            }
+            Icon(
+                imageVector = Icons.Filled.Mic,
+                contentDescription = "Записаться голосом",
+                modifier = Modifier.size(28.dp)
+            )
         }
-    }
-
-    // ---- Диалог добавления слота ----
-    if (showAddSlotDialog) {
-        AddSlotDialog(
-            doctors = doctors,
-            onDismiss = { showAddSlotDialog = false },
-            onSave = { doctorId, date, time ->
-                viewModel.addSlot(doctorId, date, time)
-                showAddSlotDialog = false
-            }
-        )
     }
 }
 
@@ -305,6 +251,10 @@ private fun WeekStrip(
             val isSelected = date == selectedDate
             val status = dayStatuses[date]
 
+            // Цвет точки:
+            //   зелёный — есть запись
+            //   синий   — есть свободный слот
+            //   жёлтый  — и то, и другое
             val dotColor = when {
                 status == null || status.isEmpty -> Color.Transparent
                 status.hasAppointment && status.hasFreeSlot -> ColorYellow
@@ -360,6 +310,9 @@ private fun WeekStrip(
     }
 }
 
+/**
+ * Карточка уже созданной записи (зелёная).
+ */
 @Composable
 private fun BookedCard(item: DayItem.Booked) {
     Card(
@@ -404,6 +357,9 @@ private fun BookedCard(item: DayItem.Booked) {
     }
 }
 
+/**
+ * Карточка свободного слота (синяя). Тап → записаться.
+ */
 @Composable
 private fun FreeSlotCard(
     item: DayItem.Free,
@@ -451,99 +407,4 @@ private fun FreeSlotCard(
             )
         }
     }
-}
-
-/**
- * Диалог добавления нового свободного слота.
- * Позволяет выбрать врача, ввести дату и время.
- */
-@Composable
-private fun AddSlotDialog(
-    doctors: List<Doctor>,
-    onDismiss: () -> Unit,
-    onSave: (doctorId: String, date: String, time: String) -> Unit
-) {
-    var selectedDoctorId by remember {
-        mutableStateOf(doctors.firstOrNull()?.id ?: "")
-    }
-    var date by remember {
-        mutableStateOf(LocalDate.now().plusDays(1).toString())
-    }
-    var time by remember { mutableStateOf("10:00") }
-    var doctorMenuExpanded by remember { mutableStateOf(false) }
-
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text("Добавить слот") },
-        text = {
-            Column(
-                modifier = Modifier.fillMaxWidth(),
-                verticalArrangement = Arrangement.spacedBy(12.dp)
-            ) {
-                Text("Врач:", style = MaterialTheme.typography.labelLarge)
-                Box {
-                    OutlinedButton(
-                        onClick = { doctorMenuExpanded = true },
-                        modifier = Modifier.fillMaxWidth()
-                    ) {
-                        val doctorName = doctors
-                            .find { it.id == selectedDoctorId }?.name
-                            ?: "Выберите врача"
-                        Text(doctorName)
-                    }
-                    DropdownMenu(
-                        expanded = doctorMenuExpanded,
-                        onDismissRequest = { doctorMenuExpanded = false }
-                    ) {
-                        doctors.forEach { doctor ->
-                            DropdownMenuItem(
-                                text = {
-                                    Text("${doctor.name} (${doctor.specialty})")
-                                },
-                                onClick = {
-                                    selectedDoctorId = doctor.id
-                                    doctorMenuExpanded = false
-                                }
-                            )
-                        }
-                    }
-                }
-
-                Text("Дата (гггг-ММ-дд):", style = MaterialTheme.typography.labelLarge)
-                OutlinedTextField(
-                    value = date,
-                    onValueChange = { date = it },
-                    singleLine = true,
-                    modifier = Modifier.fillMaxWidth()
-                )
-
-                Text("Время (ЧЧ:мм):", style = MaterialTheme.typography.labelLarge)
-                OutlinedTextField(
-                    value = time,
-                    onValueChange = { time = it },
-                    singleLine = true,
-                    modifier = Modifier.fillMaxWidth()
-                )
-            }
-        },
-        confirmButton = {
-            TextButton(
-                onClick = {
-                    if (selectedDoctorId.isNotBlank() &&
-                        date.isNotBlank() &&
-                        time.isNotBlank()
-                    ) {
-                        onSave(selectedDoctorId, date, time)
-                    }
-                }
-            ) {
-                Text("Сохранить")
-            }
-        },
-        dismissButton = {
-            TextButton(onClick = onDismiss) {
-                Text("Отмена")
-            }
-        }
-    )
 }

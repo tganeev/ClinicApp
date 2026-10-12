@@ -1,6 +1,7 @@
 package com.clinic.clinicapp.data.auth
 
 import android.content.Context
+import com.clinic.clinicapp.data.appointments.api.AppointmentsApi
 import com.clinic.clinicapp.data.auth.api.AuthApi
 import com.clinic.clinicapp.data.schedule.api.ScheduleApi
 import okhttp3.OkHttpClient
@@ -64,6 +65,9 @@ object NetworkClient {
             check(initialized) { "NetworkClient.init(context) не вызван!" }
             return retrofit.create(AuthApi::class.java)
         }
+
+    val appointmentsApi: AppointmentsApi
+        get() = retrofit.create(AppointmentsApi::class.java)
 
     val scheduleApi: ScheduleApi
         get() {
